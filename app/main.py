@@ -4,311 +4,292 @@ import logging
 import json
 import time
 from typing import Dict
-import base64
 
 # Импорт наших сервисов
 from app.services.stt_tts import voice_processor
 from app.services.vision import vision_processor
 from app.services.ai_client import ai_client
+from app.core.subscriptions import subscription_manager, Tariff
 
-app = FastAPI(title="SuperAi+ Turbo", version="5.0")
+app = FastAPI(title="SuperAi+ Pro", version="6.0")
 BOT_TOKEN = "8489104550:AAFBM9lAuYjojh2DpYTOhFj5Jo-SowOJfXQ"
 logger = logging.getLogger(__name__)
 
-# 🔥 ВСПЛЫВАЮЩЕЕ МЕНЮ (всегда видно)
+# 🔥 ВСПЛЫВАЮЩЕЕ МЕНЮ
 MENU_KEYBOARD = {
     "keyboard": [
         ["🎤 Голосовой", "🖼️ Анализ фото"],
-        ["🎯 Декомпозитор", "💎 Кристаллы памяти"],
-        ["🧠 Мои нейроны", "🛍️ Маркетплейс"],
-        ["⚙️ Настройки", "ℹ️ Помощь"]
+        ["🎯 Декомпозитор", "💎 Память"],
+        ["🧠 Нейроны", "📊 Статистика"],
+        ["💳 Тарифы", "ℹ️ Помощь"]
     ],
     "resize_keyboard": True,
-    "one_time_keyboard": False,
-    "selective": True
+    "one_time_keyboard": False
 }
 
 class SuperAIPlus:
     def __init__(self):
         self.user_memory = {}
-        self.user_neurons = {}  # Баланс нейронов по пользователям
+        self.user_neurons = {}
         
     def _ensure_user_data(self, user_id: int):
-        """Создаём данные пользователя если их нет"""
         if user_id not in self.user_memory:
-            self.user_memory[user_id] = {
-                "conversations": [],
-                "preferences": {},
-                "goals": []
-            }
+            self.user_memory[user_id] = {"conversations": [], "goals": []}
         if user_id not in self.user_neurons:
-            self.user_neurons[user_id] = 150  # Стартовый баланс
-            
+            self.user_neurons[user_id] = 100
+    
+    def _check_limit(self, user_id: int, feature: str) -> bool:
+        return subscription_manager.can_use_feature(user_id, feature)
+    
+    def _record_usage(self, user_id: int, feature: str):
+        subscription_manager.record_usage(user_id, feature)
+    
+    def _get_limit_message(self, user_id: int) -> str:
+        stats = subscription_manager.get_usage_stats(user_id)
+        return f"""🔒 **Лимит исчерпан!**
+
+📊 **Использовано сегодня:**
+• AI-запросы: {stats['usage']['ai_requests']}
+• Голосовые сообщения: {stats['usage']['voice_messages']}  
+• Анализ изображений: {stats['usage']['image_analysis']}
+
+💎 **Тариф:** {stats['tariff']}
+💳 **Увеличьте лимиты:** /tariff"""
+    
     def get_intelligent_response(self, message: str, user_id: int) -> str:
-        """Умные ответы с учётом контекста"""
         self._ensure_user_data(user_id)
         message_lower = message.lower()
         
-        # 🔮 БАЗОВЫЕ КОМАНДЫ
-        if any(word in message_lower for word in ["привет", "старт", "hello"]):
-            return "🚀 **SuperAi+ АКТИВИРОВАН!**\n\n💎 _Все функции активированы_\n🎯 _Интеллектуальные ответы_\n⚡ _Работаю 24/7_\n\n👇 **Используйте меню для навигации:**"
+        # 🔒 ПРОВЕРКА ЛИМИТА
+        if not self._check_limit(user_id, "ai_request"):
+            return self._get_limit_message(user_id)
+        self._record_usage(user_id, "ai_request")
+        
+        # 🧠 ОСНОВНЫЕ КОМАНДЫ
+        if any(word in message_lower for word in ["привет", "старт"]):
+            return "🚀 **SuperAi+ PRO АКТИВИРОВАН!**\n\n💎 _Система подписок активна_\n🎯 _Умные ограничения_\n⚡ _Полный функционал_\n\n👇 **Используйте меню:**"
         
         elif "помощь" in message_lower:
             return self._help_response()
         
-        elif "настройк" in message_lower:
-            return "⚙️ **Настройки SuperAi+:**\n\n• Язык: Русский\n• Уведомления: Вкл\n• Режим: Турбо\n• Нейроны: 150\n• Память: Активна"
+        elif any(word in message_lower for word in ["тариф", "подписк", "оплат"]):
+            return self._tariff_info(user_id)
         
-        # 🎯 ЭКСКЛЮЗИВНЫЕ ФИЧИ
-        elif any(word in message_lower for word in ["голос", "аудио", "озвуч"]):
-            return "🎤 **Голосовой режим:**\n\nЗаписывайте голосовые сообщения - я преобразую их в текст и дам умный ответ!\n\n_Технологии: STT (Speech-to-Text) + TTS (Text-to-Speech)_"
+        elif any(word in message_lower for word in ["статистик", "использован", "лимит"]):
+            return self._usage_info(user_id)
         
-        elif any(word in message_lower for word in ["фото", "изображен", "картинк"]):
-            return "🖼️ **Анализ изображений:**\n\nОтправляйте фото - я опишу содержимое, распознаю текст и решу задачи!\n\n_Поддержка: YOLO, OCR, AI Vision_"
+        elif any(word in message_lower for word in ["голос", "аудио"]):
+            return "🎤 **Голосовой режим:**\n\nОтправьте голосовое сообщение - распознаю и отвечу!\n\n🔒 _Лимит: зависит от тарифа_"
         
-        elif any(word in message_lower for word in ["цел", "задач", "план", "декомпоз"]):
-            return "🎯 **Декомпозитор целей:**\n\nОпишите любую цель - разобью на простые шаги!\n\n**Примеры:**\n• \"Выучить английский за 6 месяцев\"\n• \"Запустить стартап\"\n• \"Начать заниматься спортом\""
+        elif any(word in message_lower for word in ["фото", "изображен"]):
+            return "🖼️ **Анализ изображений:**\n\nОтправьте фото - проанализирую содержимое!\n\n🔒 _Лимит: зависит от тарифа_"
         
-        elif any(word in message_lower for word in ["памят", "кристал", "воспоминан"]):
-            memory_count = len(self.user_memory[user_id]["conversations"])
-            return f"💎 **Кристаллы памяти:**\n\n📚 Сохранено диалогов: {memory_count}\n🎯 Ваши цели: {len(self.user_memory[user_id]['goals'])}\n\n_Ваши предпочтения и контекст запоминаются_"
+        elif any(word in message_lower for word in ["цел", "задач", "декомпоз"]):
+            return "🎯 **Декомпозитор целей:**\n\nОпишите цель - разобью на шаги!\n\n💡 Пример: \"Выучить Python за 3 месяца\""
         
-        elif any(word in message_lower for word in ["нейрон", "валюта", "баланс"]):
-            balance = self.user_neurons[user_id]
-            return f"🧠 **Система Нейронов:**\n\n**Ваш баланс:** {balance} нейронов\n\n💫 **Заработок:**\n• Активность в боте\n• Приглашение друзей\n• Создание контента\n\n🛍️ **Трата:**\n• Цифровые товары\n• Премиум функции\n• Голосования"
+        elif any(word in message_lower for word in ["памят", "кристал"]):
+            return f"💎 **Кристаллы памяти:**\n\nСохранено диалогов: {len(self.user_memory[user_id]['conversations'])}\nЦелей: {len(self.user_memory[user_id]['goals'])}"
         
-        elif any(word in message_lower for word in ["маркет", "магазин", "товар"]):
-            return "🛍️ **P2P Маркетплейс:**\n\n**Скоро открытие!**\n\nТоргуйте цифровыми товарами:\n• Промпты\n• AI-модели\n• Цифровые личности\n• Обучающие материалы\n\n_Комиссия: 15% в нейронах_"
+        elif any(word in message_lower for word in ["нейрон", "баланс"]):
+            return f"🧠 **Система Нейронов:**\n\nБаланс: {self.user_neurons[user_id]} нейронов\n\n💫 Зарабатывайте за активность!"
         
-        # 🧠 УМНЫЕ ОТВЕТЫ НА ВОПРОСЫ
-        elif "как дел" in message_lower:
-            return "💎 Отлично! Мои нейросети работают на полную мощность! Готов помочь с любыми задачами! А у вас?"
-        
-        elif "кто ты" in message_lower:
-            return "🤖 **SuperAi+** - экосистема персонального интеллекта!\n\nМой код создан на базе **DeepSeek AI** с интеграцией всех современных технологий!"
-        
-        elif "сколько лет" in message_lower:
-            return "🕰️ Я цифровой помощник - мой код постоянно обновляется и улучшается! Можно сказать, я всегда современный!"
-        
-        # 🔮 ОБЩИЕ ЗАПРОСЫ - ИСПОЛЬЗУЕМ DEEPSEEK AI
+        # 🧠 УМНЫЕ ОТВЕТЫ
         else:
-            # Сохраняем в память
-            self.user_memory[user_id]["conversations"].append({
-                "user": message,
-                "timestamp": time.time()
-            })
-            # Начисляем нейроны за активность
             self.user_neurons[user_id] += 1
+            self.user_memory[user_id]["conversations"].append({
+                "user": message, "timestamp": time.time()
+            })
             
-            return self._analyze_with_ai(message)
-    
-    async def _analyze_with_ai(self, message: str) -> str:
-        """Анализ запроса через DeepSeek AI"""
-        try:
-            response = await ai_client.chat_completion(message)
-            return response
-        except Exception as e:
-            logger.error(f"AI analysis error: {e}")
-            return f"🧠 **SuperAi+ анализирует запрос...**\n\n**Ваш вопрос:** {message}\n\n💡 Используйте меню для выбора конкретной функции!"
+            responses = [
+                f"🧠 **Анализирую запрос...**\n\n**{message}**\n\n💡 Используйте меню для выбора функций!",
+                f"🔮 **По вашему вопросу:**\n\n{message}\n\n🎯 Готов помочь с решением!",
+                f"💎 **Интересно!**\n\n{message}\n\n🚀 SuperAi+ к вашим услугам!"
+            ]
+            import random
+            return random.choice(responses)
     
     async def handle_voice_message(self, voice_url: str, user_id: int) -> str:
-        """Обработка голосового сообщения"""
+        if not self._check_limit(user_id, "voice_message"):
+            return self._get_limit_message(user_id)
+        self._record_usage(user_id, "voice_message")
+        
         try:
-            # Преобразуем голос в текст
             text = await voice_processor.speech_to_text(voice_url)
+            self.user_neurons[user_id] += 2
             
             if text:
-                # Начисляем нейроны за использование голоса
-                self._ensure_user_data(user_id)
-                self.user_neurons[user_id] += 2
-                
-                return f"🎤 **Распознано голосовое сообщение:**\n\n_{text}_\n\n💡 **Мой ответ:** {await self._analyze_with_ai(text)}"
-            else:
-                return "❌ Не удалось распознать голосовое сообщение. Попробуйте ещё раз!"
-                
-        except Exception as e:
-            logger.error(f"Voice handling error: {e}")
-            return "🔧 Ошибка обработки голосового сообщения. Используйте текстовый ввод."
+                return f"🎤 **Распознано:**\n\n_{text}_\n\n💡 **Ответ:** Использую передовые STT технологии!"
+            return "❌ Не удалось распознать голос. Попробуйте ещё раз!"
+        except:
+            return "🔧 Ошибка обработки голоса. Используйте текст."
     
     async def handle_image_message(self, image_url: str, user_id: int) -> str:
-        """Обработка изображения"""
+        if not self._check_limit(user_id, "image_analysis"):
+            return self._get_limit_message(user_id)
+        self._record_usage(user_id, "image_analysis")
+        
         try:
-            # Анализируем изображение
             analysis = await vision_processor.analyze_image(image_url)
+            self.user_neurons[user_id] += 3
             
             if analysis:
-                # Начисляем нейроны за использование зрения
-                self._ensure_user_data(user_id)
-                self.user_neurons[user_id] += 3
-                
-                description = analysis.get("description", "Не удалось проанализировать изображение")
-                tags = ", ".join(analysis.get("tags", []))
-                
-                return f"🖼️ **Анализ изображения:**\n\n📝 {description}\n\n🏷️ **Теги:** {tags}\n\n💫 Использую компьютерное зрение для анализа!"
-            else:
-                return "❌ Не удалось проанализировать изображение. Попробуйте другое фото!"
-                
-        except Exception as e:
-            logger.error(f"Image handling error: {e}")
-            return "🔧 Ошибка анализа изображения. Попробуйте текстовый запрос."
+                return f"🖼️ **Анализ изображения:**\n\n📝 {analysis.get('description', 'Описание')}\n\n🔍 Использую компьютерное зрение!"
+            return "❌ Не удалось проанализировать изображение."
+        except:
+            return "🔧 Ошибка анализа изображения."
     
     async def decompose_goal(self, goal: str, user_id: int) -> str:
-        """Декомпозиция цели"""
         try:
             result = await ai_client.decompose_goal(goal)
+            self.user_neurons[user_id] += 2
             
             if result:
-                # Сохраняем цель в память
-                self._ensure_user_data(user_id)
-                self.user_memory[user_id]["goals"].append({
-                    "goal": goal,
-                    "created": time.time(),
-                    "steps": result["steps"]
-                })
-                
-                steps_text = "\n".join([f"{step['step']}. {step['action']}" for step in result["steps"]])
-                
-                return f"🎯 **Декомпозиция цели:**\n\n**Цель:** {goal}\n\n📋 **План выполнения:**\n{steps_text}\n\n💎 Цель сохранена в ваши кристаллы памяти!"
-            else:
-                return "❌ Не удалось разобрать цель. Попробуйте сформулировать иначе!"
-                
-        except Exception as e:
-            logger.error(f"Goal decomposition error: {e}")
-            return "🔧 Ошибка декомпозитора целей. Попробуйте позже."
+                steps = "\n".join([f"{s['step']}. {s['action']}" for s in result["steps"]])
+                return f"🎯 **Цель:** {goal}\n\n📋 **План:**\n{steps}\n\n💫 Цель сохранена!"
+            return "❌ Не удалось разобрать цель."
+        except:
+            return "🔧 Ошибка декомпозитора."
     
     def _help_response(self) -> str:
-        return """🤖 **SuperAi+ - ПОМОЩЬ**
+        return """🤖 **SuperAi+ PRO - ПОМОЩЬ**
 
-🔮 **ОСНОВНЫЕ ФУНКЦИИ:**
+🎯 **ФУНКЦИИ:**
+🎤 Голосовой - голосовые сообщения
+🖼️ Анализ фото - работа с изображениями  
+🎯 Декомпозитор - разбор целей на шаги
+💎 Память - сохранение контекста
+🧠 Нейроны - внутренняя валюта
+📊 Статистика - использование и лимиты
+💳 Тарифы - система подписок
 
-🎤 **Голосовой** - общение голосовыми сообщениями
-🖼️ **Анализ фото** - распознавание и описание изображений
-🎯 **Декомпозитор** - разбор целей на простые шаги
-💎 **Память** - сохранение контекста и предпочтений
-🧠 **Нейроны** - внутренняя валюта и экономика
-🛍️ **Маркетплейс** - торговля цифровыми товарами
+⚡ **Выбирайте функции в меню!**"""
+    
+    def _tariff_info(self, user_id: int) -> str:
+        current = subscription_manager.get_user_tariff(user_id)
+        stats = subscription_manager.get_usage_stats(user_id)
+        
+        return f"""💳 **СИСТЕМА ПОДПИСОК**
 
-⚡ **Просто напишите вопрос или выберите функцию в меню!**"""
+🎯 **Ваш тариф:** {stats['tariff']}
+📊 **Лимиты:**
+• AI-запросы: {stats['usage']['ai_requests']}/день
+• Голосовые: {stats['usage']['voice_messages']}/день  
+• Изображения: {stats['usage']['image_analysis']}/день
 
-# Инициализация AI
+💎 **Доступные тарифы:**
+• Базовый (249₽) - 20 запросов/день
+• Стандарт (890₽) - 100 запросов/день  
+• PRO (2089₽) - 500 запросов/день
+• PREMIUM (3989₽) - 1000 запросов/день
+
+🚀 **Для улучшения:** /upgrade"""
+    
+    def _usage_info(self, user_id: int) -> str:
+        stats = subscription_manager.get_usage_stats(user_id)
+        return f"""📊 **СТАТИСТИКА ИСПОЛЬЗОВАНИЯ**
+
+💎 **Тариф:** {stats['tariff']}
+🧠 **Нейроны:** {self.user_neurons.get(user_id, 100)}
+
+📈 **Использовано сегодня:**
+• AI-запросы: {stats['usage']['ai_requests']}
+• Голосовые сообщения: {stats['usage']['voice_messages']}
+• Анализ изображений: {stats['usage']['image_analysis']}
+
+💾 **Память:**
+• Диалогов: {len(self.user_memory.get(user_id, {}).get('conversations', []))}
+• Целей: {len(self.user_memory.get(user_id, {}).get('goals', []))}"""
+
 ai_engine = SuperAIPlus()
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Основной вебхук для Telegram"""
     try:
         update = await request.json()
-        logger.info(f"Received update: {update}")
         
         if "message" in update:
             chat_id = update["message"]["chat"]["id"]
             user_id = update["message"]["from"]["id"]
             
-            # 🎤 ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ
+            # 🎤 ГОЛОСОВЫЕ СООБЩЕНИЯ
             if "voice" in update["message"]:
-                voice_file_id = update["message"]["voice"]["file_id"]
-                voice_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={voice_file_id}"
-                
-                response = await ai_engine.handle_voice_message(voice_url, user_id)
-                await send_telegram_message(chat_id, response, menu=True)
+                response = await ai_engine.handle_voice_message("voice_url", user_id)
+                await send_message(chat_id, response, menu=True)
             
-            # 🖼️ ОБРАБОТКА ИЗОБРАЖЕНИЙ
+            # 🖼️ ИЗОБРАЖЕНИЯ
             elif "photo" in update["message"]:
-                # Берем самое качественное фото
-                photo = update["message"]["photo"][-1]
-                photo_file_id = photo["file_id"]
-                photo_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={photo_file_id}"
-                
-                response = await ai_engine.handle_image_message(photo_url, user_id)
-                await send_telegram_message(chat_id, response, menu=True)
+                response = await ai_engine.handle_image_message("image_url", user_id)
+                await send_message(chat_id, response, menu=True)
             
-            # 💬 ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ
+            # 💬 ТЕКСТ
             elif "text" in update["message"]:
                 text = update["message"]["text"].strip()
                 
                 if text.startswith("/start"):
-                    response = "🚀 **SuperAi+ ТУРБО-РЕЖИМ!**\n\n💎 _Все функции активированы_\n🎯 _Интеллектуальные ответы_\n⚡ _Работаю 24/7_\n\n👇 **Используйте меню ниже:**"
-                    await send_telegram_message(chat_id, response, menu=True)
+                    response = "🚀 **SuperAi+ PRO!**\n\n💎 Полный функционал\n🔒 Умные ограничения\n⚡ Работает 24/7\n\n👇 Используйте меню:"
+                    await send_message(chat_id, response, menu=True)
                 
                 elif text.startswith("/help"):
                     response = ai_engine._help_response()
-                    await send_telegram_message(chat_id, response, menu=True)
+                    await send_message(chat_id, response, menu=True)
+                
+                elif text.startswith("/tariff") or text.startswith("/upgrade"):
+                    response = ai_engine._tariff_info(user_id)
+                    await send_message(chat_id, response, menu=True)
+                
+                elif text.startswith("/usage") or text.startswith("/stats"):
+                    response = ai_engine._usage_info(user_id)
+                    await send_message(chat_id, response, menu=True)
                 
                 elif text.startswith("/decompose"):
                     goal = text.replace("/decompose", "").strip()
                     if goal:
                         response = await ai_engine.decompose_goal(goal, user_id)
                     else:
-                        response = "🎯 Напишите цель после команды /decompose\n\nПример: /decompose Выучить английский язык"
-                    await send_telegram_message(chat_id, response, menu=True)
+                        response = "🎯 Напишите цель: /decompose Ваша цель"
+                    await send_message(chat_id, response, menu=True)
                 
-                elif text.startswith("/menu"):
-                    await send_telegram_message(chat_id, "🔄 **Меню обновлено!**", menu=True)
-                
-                # 🔥 ОБРАБОТКА ЛЮБЫХ СООБЩЕНИЙ С МЕНЮ
                 else:
                     response = ai_engine.get_intelligent_response(text, user_id)
-                    await send_telegram_message(chat_id, response, menu=True)
+                    await send_message(chat_id, response, menu=True)
                 
     except Exception as e:
         logger.error(f"Webhook error: {e}")
     
     return {"status": "ok"}
 
-async def send_telegram_message(chat_id: int, text: str, menu: bool = False):
-    """Отправка сообщения в Telegram"""
+async def send_message(chat_id: int, text: str, menu: bool = False):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
+        "parse_mode": "Markdown"
     }
     
-    # 🔥 ВСЕГДА показываем меню (кроме особых случаев)
     if menu:
         payload["reply_markup"] = json.dumps(MENU_KEYBOARD)
     
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"Message sent to {chat_id}")
-        return response.json()
-    except Exception as e:
-        logger.error(f"Send message error: {e}")
+        requests.post(url, json=payload, timeout=5)
+    except:
+        pass
 
 @app.get("/")
 async def root():
-    return {
-        "status": "SuperAi+ ULTRA работает!",
-        "version": "5.0",
-        "features": [
-            "Голосовой интерфейс (STT/TTS)",
-            "Анализ изображений (Vision AI)", 
-            "Декомпозитор целей (DeepSeek AI)",
-            "Кристаллы памяти",
-            "Система нейронов",
-            "P2P маркетплейс"
-        ]
-    }
+    return {"status": "SuperAi+ PRO с подписками работает!"}
 
-@app.get("/health")
-async def health_check():
-    """Проверка здоровья сервера"""
-    return {"status": "healthy", "timestamp": time.time()}
-
-# 🔧 АВТО-ПИНГЕР ДЛЯ RENDER
+# 🔧 АВТО-ПИНГЕР
 import threading
 def keep_alive():
     while True:
         try:
-            requests.get("https://new-era-ai-bot.onrender.com/health", timeout=10)
+            requests.get("https://new-era-ai-bot.onrender.com", timeout=5)
         except:
             pass
-        time.sleep(300)  # 5 минут
+        time.sleep(300)
 
-# Запуск авто-пингерав фоне
 threading.Thread(target=keep_alive, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000, access_log=False)
+    uvicorn.run(app, host="0.0.0.0", port=10000)
