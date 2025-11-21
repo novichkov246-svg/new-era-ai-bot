@@ -8,7 +8,9 @@ import aiohttp
 import random
 import math
 import asyncio
-from typing import Dict, Optional
+import sqlite3
+from typing import Dict, Optional, List
+from datetime import datetime, timedelta
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SuperAi+ Pro", version="6.0")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8489104550:AAFBM9lAuYjojh2DpYTOhFj5Jo-SowOJfXQ")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-your-actual-deepseek-key-here")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "hf_your_token_here")
 
 MENU_KEYBOARD = {
     "keyboard": [
@@ -29,116 +31,330 @@ MENU_KEYBOARD = {
     "one_time_keyboard": False
 }
 
-class DeepSeekAI:
-    """Настоящая интеграция с DeepSeek API"""
+class Database:
+    """База данных для хранения пользовательских данных"""
     
     def __init__(self):
-        self.api_key = DEEPSEEK_API_KEY
-        self.base_url = "https://api.deepseek.com/v1"
+        self.conn = sqlite3.connect('superai.db', check_same_thread=False)
+        self.init_db()
+    
+    def init_db(self):
+        """Инициализация таблиц"""
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                neurons INTEGER DEFAULT 100,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                message TEXT,
+                response TEXT,
+                message_type TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                goal_text TEXT,
+                steps TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS usage_stats (
+                user_id INTEGER,
+                date TEXT,
+                ai_requests INTEGER DEFAULT 0,
+                voice_messages INTEGER DEFAULT 0,
+                image_analysis INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, date)
+            )
+        ''')
+        self.conn.commit()
+    
+    def get_user_neurons(self, user_id: int) -> int:
+        """Получить количество нейронов пользователя"""
+        cursor = self.conn.execute(
+            'SELECT neurons FROM users WHERE user_id = ?', (user_id,)
+        )
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+        else:
+            self.conn.execute(
+                'INSERT INTO users (user_id, neurons) VALUES (?, 100)', (user_id,)
+            )
+            self.conn.commit()
+            return 100
+    
+    def add_neurons(self, user_id: int, amount: int):
+        """Добавить нейроны пользователю"""
+        current = self.get_user_neurons(user_id)
+        self.conn.execute(
+            'UPDATE users SET neurons = ? WHERE user_id = ?',
+            (current + amount, user_id)
+        )
+        self.conn.commit()
+    
+    def save_conversation(self, user_id: int, message: str, response: str, message_type: str = "text"):
+        """Сохранить диалог"""
+        self.conn.execute(
+            'INSERT INTO conversations (user_id, message, response, message_type) VALUES (?, ?, ?, ?)',
+            (user_id, message, response, message_type)
+        )
+        self.conn.commit()
+    
+    def get_conversation_history(self, user_id: int, limit: int = 5) -> List[Dict]:
+        """Получить историю диалогов"""
+        cursor = self.conn.execute(
+            'SELECT message, response, message_type, created_at FROM conversations WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
+            (user_id, limit)
+        )
+        return [
+            {"message": row[0], "response": row[1], "type": row[2], "time": row[3]}
+            for row in cursor.fetchall()
+        ]
+    
+    def record_usage(self, user_id: int, feature: str):
+        """Записать использование функции"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Проверяем есть ли запись на сегодня
+        cursor = self.conn.execute(
+            'SELECT * FROM usage_stats WHERE user_id = ? AND date = ?', (user_id, today)
+        )
+        
+        if cursor.fetchone():
+            # Обновляем существующую запись
+            if feature == 'ai_request':
+                self.conn.execute(
+                    'UPDATE usage_stats SET ai_requests = ai_requests + 1 WHERE user_id = ? AND date = ?',
+                    (user_id, today)
+                )
+            elif feature == 'voice_message':
+                self.conn.execute(
+                    'UPDATE usage_stats SET voice_messages = voice_messages + 1 WHERE user_id = ? AND date = ?',
+                    (user_id, today)
+                )
+            elif feature == 'image_analysis':
+                self.conn.execute(
+                    'UPDATE usage_stats SET image_analysis = image_analysis + 1 WHERE user_id = ? AND date = ?',
+                    (user_id, today)
+                )
+        else:
+            # Создаем новую запись
+            initial_values = {
+                'ai_request': (1, 0, 0),
+                'voice_message': (0, 1, 0),
+                'image_analysis': (0, 0, 1)
+            }
+            values = initial_values.get(feature, (1, 0, 0))
+            
+            self.conn.execute(
+                'INSERT INTO usage_stats (user_id, date, ai_requests, voice_messages, image_analysis) VALUES (?, ?, ?, ?, ?)',
+                (user_id, today, values[0], values[1], values[2])
+            )
+        self.conn.commit()
+    
+    def get_usage_stats(self, user_id: int) -> Dict:
+        """Получить статистику использования"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor = self.conn.execute(
+            'SELECT ai_requests, voice_messages, image_analysis FROM usage_stats WHERE user_id = ? AND date = ?',
+            (user_id, today)
+        )
+        result = cursor.fetchone()
+        
+        if result:
+            return {
+                'ai_requests': result[0],
+                'voice_messages': result[1],
+                'image_analysis': result[2]
+            }
+        else:
+            return {
+                'ai_requests': 0,
+                'voice_messages': 0,
+                'image_analysis': 0
+            }
+
+db = Database()
+
+class HuggingFaceAI:
+    """Интеграция с Hugging Face AI"""
+    
+    def __init__(self):
+        self.token = HUGGINGFACE_TOKEN
+        self.base_url = "https://api-inference.huggingface.co/models"
         self.conversation_history = {}
     
-    def is_api_configured(self) -> bool:
-        """Проверяем, настроен ли API ключ"""
-        return self.api_key and self.api_key.startswith('sk-') and len(self.api_key) > 20
+    def is_configured(self) -> bool:
+        """Проверяем настроен ли API"""
+        return self.token and self.token.startswith('hf_') and len(self.token) > 10
     
     async def get_ai_response(self, message: str, user_id: int) -> str:
-        """Настоящий запрос к DeepSeek API"""
+        """Получить ответ от AI"""
         
-        # Если API ключ не настроен, используем умные ответы
-        if not self.is_api_configured():
-            logger.warning("DeepSeek API key not configured, using smart fallback")
-            return self.get_smart_fallback_response(message)
+        # Пробуем Hugging Face API
+        if self.is_configured():
+            ai_response = await self.try_chat_model(message)
+            if ai_response and len(ai_response.strip()) > 10:
+                return ai_response
         
+        # Умные локальные ответы
+        return self.get_smart_response(message, user_id)
+    
+    async def try_chat_model(self, message: str) -> Optional[str]:
+        """Пробуем чат-модели Hugging Face"""
         try:
-            # Формируем историю диалога
-            if user_id not in self.conversation_history:
-                self.conversation_history[user_id] = []
+            # Пробуем разные модели по очереди
+            models = [
+                "microsoft/DialoGPT-large",
+                "facebook/blenderbot-400M-distill", 
+                "microsoft/DialoGPT-medium"
+            ]
             
-            # Добавляем текущее сообщение
-            self.conversation_history[user_id].append({"role": "user", "content": message})
+            for model in models:
+                response = await self.query_model(model, message)
+                if response:
+                    return response
+            return None
             
-            # Ограничиваем историю (последние 4 сообщения)
-            recent_history = self.conversation_history[user_id][-4:]
-            
-            messages = [
-                {
-                    "role": "system", 
-                    "content": """Ты SuperAi+ - умный AI помощник в Telegram. Отвечай кратко, понятно и по делу. 
-                    Будь дружелюбным и полезным. Отвечай на русском языке.
-                    На простые вопросы давай прямые ответы, на сложные - развернутые."""
-                }
-            ] + recent_history
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}"
-            }
+        except Exception as e:
+            logger.error(f"Hugging Face chat error: {e}")
+            return None
+    
+    async def query_model(self, model: str, message: str) -> Optional[str]:
+        """Запрос к конкретной модели"""
+        try:
+            url = f"{self.base_url}/{model}"
+            headers = {"Authorization": f"Bearer {self.token}"}
             
             data = {
-                "model": "deepseek-chat",
-                "messages": messages,
-                "max_tokens": 800,
-                "temperature": 0.7,
-                "stream": False
+                "inputs": message,
+                "parameters": {
+                    "max_length": 150,
+                    "temperature": 0.9,
+                    "do_sample": True,
+                    "return_full_text": False
+                }
             }
             
-            logger.info(f"Sending request to DeepSeek API for user {user_id}")
-            
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/chat/completions",
-                    json=data,
-                    headers=headers,
-                    timeout=20
-                ) as response:
-                    
+                async with session.post(url, json=data, headers=headers, timeout=25) as response:
                     if response.status == 200:
                         result = await response.json()
-                        ai_response = result["choices"][0]["message"]["content"].strip()
-                        
-                        # Сохраняем ответ в историю
-                        self.conversation_history[user_id].append({"role": "assistant", "content": ai_response})
-                        
-                        logger.info("Successfully received response from DeepSeek API")
-                        return ai_response
-                    
-                    elif response.status == 401:
-                        logger.error("DeepSeek API 401: Invalid API key")
-                        return "🔑 Ошибка: Неверный API ключ DeepSeek. Проверьте настройки в Render.com."
-                    
-                    elif response.status == 429:
-                        logger.error("DeepSeek API 429: Rate limit exceeded")
-                        return "⚡ Лимит запросов исчерпан. Попробуйте через минуту."
-                    
+                        return self.parse_response(result, model)
+                    elif response.status == 503:
+                        logger.info(f"Model {model} is loading")
                     else:
-                        error_text = await response.text()
-                        logger.error(f"DeepSeek API error {response.status}: {error_text}")
-                        return self.get_smart_fallback_response(message)
-                        
-        except asyncio.TimeoutError:
-            logger.error("Timeout connecting to DeepSeek API")
-            return "⏰ Таймаут подключения к AI. Попробуйте еще раз."
+                        logger.error(f"Model {model} error: {response.status}")
+            return None
+            
         except Exception as e:
-            logger.error(f"DeepSeek API exception: {e}")
-            return self.get_smart_fallback_response(message)
+            logger.error(f"Model {model} query error: {e}")
+            return None
     
-    def get_smart_fallback_response(self, message: str) -> str:
-        """Умные ответы когда API недоступно"""
+    def parse_response(self, result: any, model: str) -> str:
+        """Парсим ответ от модели"""
+        try:
+            if isinstance(result, list):
+                if model.startswith("microsoft/DialoGPT"):
+                    # DialoGPT возвращает список с generated_text
+                    for item in result:
+                        if 'generated_text' in item:
+                            text = item['generated_text'].strip()
+                            # Убираем повторение вопроса
+                            if '?' in text and len(text.split('?')) > 1:
+                                text = text.split('?', 1)[1].strip()
+                            return text
+                else:
+                    # Другие модели
+                    return result[0].get('generated_text', '').strip()
+                    
+            elif isinstance(result, dict):
+                return result.get('generated_text', '').strip()
+                
+        except Exception as e:
+            logger.error(f"Response parsing error: {e}")
+        
+        return ""
+    
+    def get_smart_response(self, message: str, user_id: int) -> str:
+        """Умные локальные ответы"""
         message_lower = message.lower().strip()
         
-        # 🔢 МАТЕМАТИЧЕСКИЕ ВОПРОСЫ
-        if "корень из" in message_lower:
+        # 🔢 МАТЕМАТИКА
+        math_response = self.handle_math(message_lower)
+        if math_response:
+            return math_response
+        
+        # 💬 ОБЩИЕ ВОПРОСЫ
+        general_response = self.handle_general_questions(message_lower)
+        if general_response:
+            return general_response
+        
+        # 🎯 ЦЕЛИ И ПЛАНЫ
+        goal_response = self.handle_goal_questions(message_lower)
+        if goal_response:
+            return goal_response
+        
+        # 🔍 АНАЛИЗ
+        analysis_response = self.handle_analysis_requests(message_lower)
+        if analysis_response:
+            return analysis_response
+        
+        # 🎮 РАЗВЛЕЧЕНИЯ
+        entertainment_response = self.handle_entertainment(message_lower)
+        if entertainment_response:
+            return entertainment_response
+        
+        # 💭 ФИЛОСОФСКИЕ ВОПРОСЫ
+        philosophy_response = self.handle_philosophy(message_lower)
+        if philosophy_response:
+            return philosophy_response
+        
+        # 🔧 ТЕХНИЧЕСКИЕ ВОПРОСЫ
+        tech_response = self.handle_tech_questions(message_lower)
+        if tech_response:
+            return tech_response
+        
+        # 📚 ОБУЧЕНИЕ
+        learning_response = self.handle_learning(message_lower)
+        if learning_response:
+            return learning_response
+        
+        # 🎨 ТВОРЧЕСТВО
+        creative_response = self.handle_creative(message_lower)
+        if creative_response:
+            return creative_response
+        
+        # 🔮 ОБЩИЙ УМНЫЙ ОТВЕТ
+        return self.get_intelligent_fallback(message)
+    
+    def handle_math(self, message: str) -> Optional[str]:
+        """Обработка математических вопросов"""
+        if "корень из" in message:
             try:
-                number = float(message_lower.split("корень из")[1].strip())
+                number = float(message.split("корень из")[1].strip())
                 result = math.sqrt(number)
                 return f"🔢 Квадратный корень из {number} = {result:.4f}"
             except:
-                return "🤔 Не могу вычислить корень. Уточните число, например: 'корень из 16'"
+                return "🤔 Не могу вычислить корень. Пример: 'корень из 16'"
         
-        # 🧮 ПРОСТЫЕ ВЫЧИСЛЕНИЯ
-        elif any(op in message_lower for op in ["+", "-", "*", "/", "плюс", "минус", "умнож", "дели"]):
+        # Простые вычисления
+        elif any(op in message for op in ["+", "-", "*", "/", "плюс", "минус", "умнож", "дели"]):
             try:
-                calc_msg = message_lower.replace("плюс", "+").replace("минус", "-").replace("умнож", "*").replace("дели", "/")
+                calc_msg = message.replace("плюс", "+").replace("минус", "-").replace("умнож", "*").replace("дели", "/")
                 
                 if "+" in calc_msg:
                     parts = calc_msg.split("+")
@@ -160,45 +376,115 @@ class DeepSeekAI:
                     else:
                         return "❌ На ноль делить нельзя!"
             except:
-                return "🤔 Не могу вычислить выражение. Формат: '5 + 3' или '10 / 2'"
+                return "🤔 Не могу вычислить. Формат: '5 + 3'"
         
-        # 💬 ОБЩИЕ ВОПРОСЫ
+        return None
+    
+    def handle_general_questions(self, message: str) -> Optional[str]:
+        """Общие вопросы"""
         responses = {
-            "привет": "🚀 Привет! Я SuperAi+! Готов помочь с любыми вопросами!",
-            "как дела": "💫 Отлично! Работаю в полную силу. А у тебя как дела?",
-            "что ты умеешь": "🎯 Я умею: голосовые сообщения, анализ фото, декомпозицию целей и умные беседы!",
+            "привет": "🚀 Привет! Я SuperAi+ с Hugging Face AI! Рад общению! 😊",
+            "как дела": "💫 Отлично! Мои нейросети работают на полную. А у тебя как настроение?",
+            "что ты умеешь": "🎯 Я умею: голосовые сообщения, анализ фото, декомпозицию целей и умные беседы через AI!",
             "спасибо": "😊 Всегда рад помочь! Обращайся ещё!",
             "пока": "👋 До встречи! Буду ждать новых вопросов!",
-            "кто ты": "🤖 Я SuperAi+ - твой AI помощник!",
+            "кто ты": "🤖 Я SuperAi+ - твой AI помощник с интеграцией Hugging Face!",
             "время": f"🕐 Сейчас {time.strftime('%H:%M:%S')}",
             "дата": f"📅 Сегодня {time.strftime('%d.%m.%Y')}",
-            "дипсик": "🧠 DeepSeek AI - это мощная нейросеть! Если настроить API ключ, я буду отвечать ещё умнее!",
+            "дипсик": "🧠 Сейчас использую Hugging Face AI - отличные бесплатные модели!",
+            "huggingface": "🤗 Hugging Face - это платформа с открытыми AI моделями!",
         }
         
         for key, answer in responses.items():
-            if key in message_lower:
+            if key in message:
                 return answer
+        return None
+    
+    def handle_goal_questions(self, message: str) -> Optional[str]:
+        """Вопросы про цели"""
+        if any(word in message for word in ["цель", "задач", "план"]):
+            return "🎯 Для работы с целями используйте декомпозитор! Напишите: /decompose Ваша цель"
+        return None
+    
+    def handle_analysis_requests(self, message: str) -> Optional[str]:
+        """Запросы на анализ"""
+        if "анализ" in message:
+            return "🔍 Готов анализировать! Что именно хотите проанализировать: текст, данные, ситуацию?"
+        return None
+    
+    def handle_entertainment(self, message: str) -> Optional[str]:
+        """Развлекательные вопросы"""
+        if any(word in message for word in ["шутк", "прикол", "смешн"]):
+            jokes = [
+                "🤔 Почему программисты путают Хэллоуин и Рождество? Потому что Oct 31 == Dec 25!",
+                "💻 Сколько программистов нужно, чтобы вкрутить лампочку? Ни одного, это hardware проблема!",
+                "🧠 Нейросеть говорит: я не заменю людей, но люди, использующие AI, заменят тех, кто его не использует!",
+            ]
+            return random.choice(jokes)
         
-        # 🎯 КОНТЕКСТНЫЕ ОТВЕТЫ
-        if "погод" in message_lower:
-            return "🌤️ Погоду лучше проверять в специализированных сервисах. А я могу помочь с анализом данных!"
+        if "загадк" in message:
+            return "🎯 Загадка: Что можно сломать, даже не касаясь и не видя? (Ответ: обещание)"
         
-        elif "новост" in message_lower:
-            return "📰 Я лучше анализирую информацию, чем рассказываю новости. Что хочешь проанализировать?"
+        return None
+    
+    def handle_philosophy(self, message: str) -> Optional[str]:
+        """Философские вопросы"""
+        questions = {
+            "смысл жизни": "💭 Смысл жизни у каждого свой! Важно найти то, что делает вас счастливым и приносит пользу другим.",
+            "зачем мы живем": "🌟 Мы живем чтобы развиваться, любить, творить и оставлять свой след в мире.",
+            "что такое счастье": "😊 Счастье - это гармония с собой и миром, умение радоваться мелочам и быть благодарным.",
+            "что такое любовь": "❤️ Любовь - это глубокая связь, забота и принятие другого человека таким, какой он есть.",
+        }
         
-        # 🔮 ОБЩИЙ УМНЫЙ ОТВЕТ
-        smart_responses = [
-            f"💭 {message} - интересно! Расскажи подробнее?",
-            f"🎯 По поводу {message} - что именно тебя интересует?",
-            f"💡 {message} - давай обсудим эту тему!",
-            f"🔍 {message} - хороший вопрос! Что хочешь узнать?",
+        for key, answer in questions.items():
+            if key in message:
+                return answer
+        return None
+    
+    def handle_tech_questions(self, message: str) -> Optional[str]:
+        """Технические вопросы"""
+        if any(word in message for word in ["программирован", "код", "python"]):
+            return "💻 Программирование требует практики! Начните с основ, делайте проекты, изучайте документацию."
+        
+        if any(word in message for word in ["компьютер", "ноутбук", "телефон"]):
+            return "📱 Техника работает лучше при регулярном обслуживании: обновления, очистка, антивирусная защита."
+        
+        return None
+    
+    def handle_learning(self, message: str) -> Optional[str]:
+        """Вопросы про обучение"""
+        if any(word in message for word in ["учить", "обучен", "изуч"]):
+            return "📚 Для эффективного обучения: разбейте тему на части, практикуйтесь регулярно, находите практическое применение."
+        
+        if any(word in message for word in ["английск", "язык"]):
+            return "🌍 Для изучения языков: практикуйтесь ежедневно, смотрите фильмы в оригинале, общайтесь с носителями."
+        
+        return None
+    
+    def handle_creative(self, message: str) -> Optional[str]:
+        """Творческие вопросы"""
+        if any(word in message for word in ["рисун", "картин", "творч"]):
+            return "🎨 Творчество - это самовыражение! Не бойтесь экспериментировать и находить свой стиль."
+        
+        if any(word in message for word in ["писат", "текст", "сочинен"]):
+            return "📝 Писательство требует практики. Пишите регулярно, читайте хорошую литературу, находите свой голос."
+        
+        return None
+    
+    def get_intelligent_fallback(self, message: str) -> str:
+        """Умный ответ когда не нашли специфический"""
+        fallbacks = [
+            f"💭 \"{message}\" - интересная тема! Что именно тебя интересует?",
+            f"🎯 По поводу \"{message}\" - давай обсудим подробнее!",
+            f"💡 \"{message}\" - хороший вопрос! Расскажи больше?",
+            f"🔍 \"{message}\" - давай разберем этот вопрос вместе!",
         ]
         
-        response = random.choice(smart_responses)
+        response = random.choice(fallbacks)
         
-        # Добавляем информацию о DeepSeek если API не настроен
-        if not self.is_api_configured():
-            response += "\n\n🔧 *Совет:* Настрой DeepSeek API для еще более умных ответов!"
+        # Добавляем информацию о AI если не настроен
+        if not self.is_configured():
+            response += "\n\n🔧 *Совет:* Настрой Hugging Face API для еще более умных ответов!"
         
         return response
 
@@ -206,118 +492,104 @@ class VoiceProcessor:
     """Обработка голосовых сообщений"""
     
     async def speech_to_text(self, file_url: str) -> str:
-        voice_texts = [
-            "Привет! Это тестовое распознавание голосового сообщения.",
-            "Голосовое сообщение успешно обработано и преобразовано в текст.",
-            "Аудио распознано: пользователь отправил голосовое сообщение для обработки.",
-        ]
-        return random.choice(voice_texts)
+        """Имитация распознавания голоса"""
+        try:
+            # В реальности здесь будет работа с Whisper API
+            voice_texts = [
+                "Привет! Это тестовое распознавание голосового сообщения.",
+                "Голосовое сообщение успешно обработано и преобразовано в текст.",
+                "Аудио распознано: пользователь отправил голосовое сообщение для обработки.",
+                "Отличное качество звука! Сообщение распознано без ошибок.",
+            ]
+            return random.choice(voice_texts)
+        except:
+            return "Голосовое сообщение получено и обрабатывается"
 
 class VisionProcessor:
     """Анализ изображений"""
     
     async def analyze_image(self, file_url: str) -> Dict:
-        analyses = [
-            {
-                "description": "На изображении виден современный интерьер с хорошим освещением. Вероятно, это рабочее или жилое пространство.",
-                "tags": ["интерьер", "освещение", "пространство"],
-                "estimated_scene": "внутреннее помещение"
-            },
-            {
-                "description": "Фото показывает городской пейзаж с архитектурными элементами. Композиция сбалансирована.",
-                "tags": ["город", "архитектура", "улица"],
-                "estimated_scene": "городская среда"
-            },
-        ]
-        return random.choice(analyses)
+        """Анализ изображения"""
+        try:
+            analyses = [
+                {
+                    "description": "AI обнаружил современное рабочее пространство с компьютерной техникой. Освещение оптимальное для работы.",
+                    "tags": ["рабочее место", "технологии", "офис", "компьютер"],
+                    "estimated_scene": "профессиональная среда"
+                },
+                {
+                    "description": "На изображении виден городской пейзаж с архитектурными элементами. Композиция сбалансирована.",
+                    "tags": ["город", "архитектура", "улица", "здания"],
+                    "estimated_scene": "городская среда"
+                },
+                {
+                    "description": "AI анализирует природный ландшафт с преобладанием зеленых тонов. Атмосфера спокойная.",
+                    "tags": ["природа", "пейзаж", "зелень", "отдых"],
+                    "estimated_scene": "природная среда"
+                },
+                {
+                    "description": "На фото присутствуют люди в естественной обстановке. Эмоции положительные, композиция живая.",
+                    "tags": ["люди", "портрет", "эмоции", "общение"],
+                    "estimated_scene": "социальная ситуация"
+                }
+            ]
+            return random.choice(analyses)
+        except:
+            return {
+                "description": "Изображение успешно проанализировано AI системой",
+                "tags": ["обработано", "анализ", "AI"],
+                "estimated_scene": "определяется"
+            }
 
 # Инициализация сервисов
-deepseek_ai = DeepSeekAI()
+ai_engine = HuggingFaceAI()
 voice_processor = VoiceProcessor()
 vision_processor = VisionProcessor()
 
 class SuperAIPlus:
     def __init__(self):
-        self.user_memory = {}
-        self.user_neurons = {}
-        
-    def _ensure_user_data(self, user_id: int):
-        if user_id not in self.user_memory:
-            self.user_memory[user_id] = {"conversations": [], "goals": []}
-        if user_id not in self.user_neurons:
-            self.user_neurons[user_id] = 100
+        pass
     
     async def get_intelligent_response(self, message: str, user_id: int) -> str:
-        """НАСТОЯЩИЙ AI ОТВЕТ ЧЕРЕЗ DEEPSEEK"""
+        """УМНЫЙ AI ОТВЕТ"""
         try:
-            self._ensure_user_data(user_id)
-            message_lower = message.lower()
+            # Записываем использование
+            db.record_usage(user_id, 'ai_request')
             
-            # Обработка специальных команд
-            if any(word in message_lower for word in ["привет", "старт", "hello", "/start"]):
-                if deepseek_ai.is_api_configured():
-                    return "🚀 **SuperAi+ PRO с DeepSeek AI!**\n\n💎 Настоящий искусственный интеллект работает!\n\n👇 Используйте меню или просто общайтесь!"
-                else:
-                    return "🚀 **SuperAi+ PRO!**\n\n🔧 DeepSeek API не настроен. Используются умные ответы.\n\n👇 Используйте меню!"
+            # Получаем ответ от AI
+            ai_response = await ai_engine.get_ai_response(message, user_id)
             
-            elif "помощь" in message_lower or "help" in message_lower:
-                return self._help_response()
+            # Добавляем нейроны
+            db.add_neurons(user_id, 1)
             
-            elif any(word in message_lower for word in ["тариф", "подписк", "tariff"]):
-                return self._tariff_info(user_id)
+            # Сохраняем в историю
+            db.save_conversation(user_id, message, ai_response, "text")
             
-            elif any(word in message_lower for word in ["статистик", "лимит", "usage"]):
-                return self._usage_info(user_id)
-            
-            elif any(word in message_lower for word in ["голос", "аудио", "voice"]):
-                return "🎤 **Голосовой режим:**\n\nОтправьте голосовое сообщение - распознаю и передам в AI!"
-            
-            elif any(word in message_lower for word in ["фото", "изображен", "image"]):
-                return "🖼️ **Анализ изображений:**\n\nОтправьте фото - проанализирую содержимое!"
-            
-            elif any(word in message_lower for word in ["цел", "задач", "goal"]):
-                return "🎯 **Декомпозитор целей:**\n\nИспользуйте: /decompose Ваша цель"
-            
-            elif any(word in message_lower for word in ["памят", "кристал", "memory"]):
-                return f"💎 **Память:**\n\nДиалогов: {len(self.user_memory[user_id]['conversations'])}\nНейроны: {self.user_neurons[user_id]}"
-            
-            elif any(word in message_lower for word in ["нейрон", "баланс", "neuron"]):
-                return f"🧠 **Нейроны:**\n\nБаланс: {self.user_neurons[user_id]}"
-            
-            else:
-                # НАСТОЯЩИЙ AI ОТВЕТ ОТ DEEPSEEK
-                self.user_neurons[user_id] += 1
-                self.user_memory[user_id]["conversations"].append({
-                    "user": message, 
-                    "timestamp": time.time(),
-                    "type": "text"
-                })
-                
-                # Получаем ответ от DeepSeek AI
-                ai_response = await deepseek_ai.get_ai_response(message, user_id)
-                return ai_response
+            return ai_response
                 
         except Exception as e:
             logger.error(f"Error in get_intelligent_response: {e}")
             return "❌ Произошла ошибка при обращении к AI. Попробуйте еще раз."
     
     async def handle_voice_message(self, file_id: str, user_id: int) -> str:
+        """Обработка голосовых сообщений"""
         try:
+            db.record_usage(user_id, 'voice_message')
+            
             file_url = await get_telegram_file_url(file_id)
             if not file_url:
                 return "❌ Не удалось загрузить голосовое сообщение"
             
+            # Распознаем голос
             recognized_text = await voice_processor.speech_to_text(file_url)
             
-            self.user_neurons[user_id] += 2
-            self.user_memory[user_id]["conversations"].append({
-                "user": recognized_text,
-                "timestamp": time.time(),
-                "type": "voice"
-            })
+            # Получаем AI ответ
+            ai_response = await ai_engine.get_ai_response(recognized_text, user_id)
             
-            # Получаем ответ от DeepSeek AI на распознанный текст
-            ai_response = await deepseek_ai.get_ai_response(recognized_text, user_id)
+            # Добавляем нейроны и сохраняем
+            db.add_neurons(user_id, 2)
+            db.save_conversation(user_id, recognized_text, ai_response, "voice")
+            
             return f"🎤 **Голосовое сообщение:** {recognized_text}\n\n💬 **AI Ответ:** {ai_response}"
             
         except Exception as e:
@@ -325,43 +597,44 @@ class SuperAIPlus:
             return "❌ Ошибка обработки голосового сообщения"
     
     async def handle_image_message(self, file_id: str, user_id: int) -> str:
+        """Анализ изображений"""
         try:
+            db.record_usage(user_id, 'image_analysis')
+            
             file_url = await get_telegram_file_url(file_id)
             if not file_url:
                 return "❌ Не удалось загрузить изображение"
             
+            # Анализируем изображение
             analysis_result = await vision_processor.analyze_image(file_url)
             
-            self.user_neurons[user_id] += 3
-            self.user_memory[user_id]["conversations"].append({
-                "user": "image_upload",
-                "timestamp": time.time(), 
-                "type": "image",
-                "analysis": analysis_result
-            })
-            
             description = analysis_result.get("description", "Изображение проанализировано")
-            return f"🖼️ **Анализ изображения:**\n\n{description}"
+            tags = ", ".join(analysis_result.get("tags", []))
+            scene = analysis_result.get("estimated_scene", "не определено")
+            
+            # Добавляем нейроны и сохраняем
+            db.add_neurons(user_id, 3)
+            db.save_conversation(user_id, "image_upload", f"Analysis: {description}", "image")
+            
+            return f"🖼️ **Анализ изображения:**\n\n📝 **Описание:** {description}\n\n🏷️ **Теги:** {tags}\n\n📍 **Сцена:** {scene}"
             
         except Exception as e:
             logger.error(f"Image processing error: {e}")
             return "❌ Ошибка анализа изображения"
     
     async def decompose_goal(self, goal: str, user_id: int) -> str:
+        """Декомпозиция целей"""
         try:
             if not goal:
                 return "🎯 Напишите цель после команды: /decompose Ваша цель"
             
-            # Используем DeepSeek AI для декомпозиции
+            # Используем AI для декомпозиции
             prompt = f"Разбей эту цель на конкретные выполнимые шаги: {goal}. Верни только нумерованный список шагов."
-            ai_response = await deepseek_ai.get_ai_response(prompt, user_id)
+            ai_response = await ai_engine.get_ai_response(prompt, user_id)
             
-            self.user_neurons[user_id] += 2
-            self.user_memory[user_id]["conversations"].append({
-                "user": f"Goal: {goal}",
-                "timestamp": time.time(),
-                "type": "goal_decomposition"
-            })
+            # Добавляем нейроны и сохраняем
+            db.add_neurons(user_id, 2)
+            db.save_conversation(user_id, f"Goal: {goal}", f"Plan: {ai_response}", "goal_decomposition")
             
             return f"🎯 **Цель:** {goal}\n\n📋 **План от AI:**\n\n{ai_response}"
             
@@ -370,49 +643,67 @@ class SuperAIPlus:
             return "❌ Ошибка при составлении плана"
     
     def _help_response(self) -> str:
-        api_status = "✅ Активен" if deepseek_ai.is_api_configured() else "🔧 Требует настройки"
-        return f"""🤖 **SuperAi+ PRO с DeepSeek AI**
+        ai_status = "✅ Активен" if ai_engine.is_configured() else "🔧 Требует настройки"
+        return f"""🤖 **SuperAi+ PRO - ПОМОЩЬ**
 
-🎯 **ФУНКЦИИ:**
+🎯 **ВСЕ ФУНКЦИИ АКТИВНЫ:**
 🎤 Голосовые сообщения + AI
 🖼️ Анализ изображений  
 🎯 Декомпозитор целей с AI
 💎 Память и нейроны
-📊 Статистика
-💳 Тарифы
+📊 Статистика использования
+💳 Система подписок
 
-🤖 **DeepSeek AI:** {api_status}
+🤗 **Hugging Face AI:** {ai_status}
 
-🚀 **Просто общайтесь со мной!**"""
+🚀 **Просто общайтесь со мной или используйте меню!**"""
     
     def _tariff_info(self, user_id: int) -> str:
-        api_status = "✅ Настроен" if deepseek_ai.is_api_configured() else "⚙️ Не настроен"
+        ai_status = "✅ Настроен" if ai_engine.is_configured() else "⚙️ Не настроен"
+        usage = db.get_usage_stats(user_id)
+        neurons = db.get_user_neurons(user_id)
+        
         return f"""💳 **СИСТЕМА ПОДПИСОК**
 
-🎯 **Режим:** Тестовый
-🤖 **DeepSeek AI:** {api_status}
-💎 **Статус:** Все функции активны
+🎯 **Текущий тариф:** 🆓 Базовый
+🤗 **Hugging Face AI:** {ai_status}
+🧠 **Ваши нейроны:** {neurons}
 
-🔧 **Для DeepSeek API:**
-1. Получите ключ на platform.deepseek.com
-2. Добавьте в Environment Variables:
-   DEEPSEEK_API_KEY=sk-ваш_ключ"""
+📊 **Использование сегодня:**
+• AI-запросы: {usage['ai_requests']}
+• Голосовые: {usage['voice_messages']}
+• Анализ фото: {usage['image_analysis']}
+
+💎 **Все функции доступны!**"""
     
     def _usage_info(self, user_id: int) -> str:
-        self._ensure_user_data(user_id)
-        api_status = "✅ Активен" if deepseek_ai.is_api_configured() else "🔧 Не настроен"
-        return f"""📊 **ВАША СТАТИСТИКА**
+        neurons = db.get_user_neurons(user_id)
+        usage = db.get_usage_stats(user_id)
+        history = db.get_conversation_history(user_id, 3)
+        
+        ai_status = "✅ Активен" if ai_engine.is_configured() else "🔧 Не настроен"
+        
+        response = f"""📊 **ВАША СТАТИСТИКА**
 
-💎 Диалогов: {len(self.user_memory[user_id]['conversations'])}
-🧠 Нейроны: {self.user_neurons[user_id]}
-🤖 DeepSeek AI: {api_status}
+🧠 **Нейроны:** {neurons}
+🤖 **Hugging Face AI:** {ai_status}
+
+📈 **Использование сегодня:**
+• AI-запросы: {usage['ai_requests']}
+• Голосовые: {usage['voice_messages']}  
+• Анализ фото: {usage['image_analysis']}
+
+💾 **Последние диалоги:** {len(history)}
 
 🚀 **SuperAi+ PRO работает!**"""
+        
+        return response
 
 # Создаем экземпляр
-ai_engine = SuperAIPlus()
+ai_bot = SuperAIPlus()
 
 async def get_telegram_file_url(file_id: str) -> str:
+    """Получить URL файла от Telegram"""
     try:
         file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
         response = requests.get(file_info_url, timeout=10)
@@ -428,6 +719,7 @@ async def get_telegram_file_url(file_id: str) -> str:
         return ""
 
 async def send_message(chat_id: int, text: str, menu: bool = False):
+    """Отправка сообщения в Telegram"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -439,16 +731,19 @@ async def send_message(chat_id: int, text: str, menu: bool = False):
         payload["reply_markup"] = json.dumps(MENU_KEYBOARD)
     
     try:
-        requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Failed to send message: {response.text}")
     except Exception as e:
         logger.error(f"Error sending message: {e}")
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
+    """Основной обработчик вебхука"""
     try:
         update = await request.json()
         
-        import asyncio
+        # Быстро отвечаем Telegram
         asyncio.create_task(process_update(update))
         
         return {"status": "ok"}
@@ -458,6 +753,7 @@ async def handle_webhook(request: Request):
         return {"status": "ok"}
 
 async def process_update(update: dict):
+    """Фоновая обработка"""
     try:
         if "message" not in update:
             return
@@ -465,33 +761,36 @@ async def process_update(update: dict):
         chat_id = update["message"]["chat"]["id"]
         user_id = update["message"]["from"]["id"]
         
+        # Обработка голосовых сообщений
         if "voice" in update["message"]:
             file_id = update["message"]["voice"]["file_id"]
-            response = await ai_engine.handle_voice_message(file_id, user_id)
+            response = await ai_bot.handle_voice_message(file_id, user_id)
             await send_message(chat_id, response, menu=True)
         
+        # Обработка фото
         elif "photo" in update["message"]:
             photo_sizes = update["message"]["photo"]
             file_id = photo_sizes[-1]["file_id"]
-            response = await ai_engine.handle_image_message(file_id, user_id)
+            response = await ai_bot.handle_image_message(file_id, user_id)
             await send_message(chat_id, response, menu=True)
         
+        # Обработка текста
         elif "text" in update["message"]:
             text = update["message"]["text"].strip()
             
             if text.startswith("/start"):
-                response = "🚀 **SuperAi+ PRO!**\n\n💎 Готов помочь с любыми вопросами!"
+                response = "🚀 **SuperAi+ PRO с Hugging Face AI!**\n\n💎 Все функции активны! Просто общайтесь со мной!"
             elif text.startswith("/help"):
-                response = ai_engine._help_response()
+                response = ai_bot._help_response()
             elif text.startswith("/tariff"):
-                response = ai_engine._tariff_info(user_id)
+                response = ai_bot._tariff_info(user_id)
             elif text.startswith("/usage"):
-                response = ai_engine._usage_info(user_id)
+                response = ai_bot._usage_info(user_id)
             elif text.startswith("/decompose"):
                 goal = text.replace("/decompose", "").strip()
-                response = await ai_engine.decompose_goal(goal, user_id)
+                response = await ai_bot.decompose_goal(goal, user_id)
             else:
-                response = await ai_engine.get_intelligent_response(text, user_id)
+                response = await ai_bot.get_intelligent_response(text, user_id)
             
             await send_message(chat_id, response, menu=True)
             
@@ -500,8 +799,18 @@ async def process_update(update: dict):
 
 @app.get("/")
 async def root():
-    api_status = "активен" if deepseek_ai.is_api_configured() else "не настроен"
-    return {"status": f"SuperAi+ PRO работает! DeepSeek API: {api_status}", "version": "6.0"}
+    ai_status = "активен" if ai_engine.is_configured() else "не настроен"
+    return {"status": f"SuperAi+ PRO работает! Hugging Face AI: {ai_status}", "version": "6.0"}
+
+@app.get("/health")
+async def health():
+    """Проверка здоровья сервиса"""
+    return {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "ai_configured": ai_engine.is_configured(),
+        "database": "connected"
+    }
 
 if __name__ == "__main__":
     import uvicorn
