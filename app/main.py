@@ -7,6 +7,7 @@ import os
 import aiohttp
 import random
 import math
+import asyncio
 from typing import Dict, Optional
 
 # Настройка логирования
@@ -36,31 +37,35 @@ class DeepSeekAI:
         self.base_url = "https://api.deepseek.com/v1"
         self.conversation_history = {}
     
+    def is_api_configured(self) -> bool:
+        """Проверяем, настроен ли API ключ"""
+        return self.api_key and self.api_key.startswith('sk-') and len(self.api_key) > 20
+    
     async def get_ai_response(self, message: str, user_id: int) -> str:
         """Настоящий запрос к DeepSeek API"""
         
-        # Если API ключ не настроен, используем умные локальные ответы
-        if not self.api_key or self.api_key == "sk-your-actual-deepseek-key-here":
-            return await self.get_smart_fallback_response(message, user_id)
+        # Если API ключ не настроен, используем умные ответы
+        if not self.is_api_configured():
+            logger.warning("DeepSeek API key not configured, using smart fallback")
+            return self.get_smart_fallback_response(message)
         
         try:
-            # Формируем контекст диалога
+            # Формируем историю диалога
             if user_id not in self.conversation_history:
                 self.conversation_history[user_id] = []
             
-            # Добавляем текущее сообщение в историю
+            # Добавляем текущее сообщение
             self.conversation_history[user_id].append({"role": "user", "content": message})
             
-            # Ограничиваем историю (последние 10 сообщений)
-            recent_history = self.conversation_history[user_id][-10:]
+            # Ограничиваем историю (последние 4 сообщения)
+            recent_history = self.conversation_history[user_id][-4:]
             
-            # Подготавливаем сообщения для API
             messages = [
                 {
                     "role": "system", 
                     "content": """Ты SuperAi+ - умный AI помощник в Telegram. Отвечай кратко, понятно и по делу. 
-                    Будь дружелюбным и полезным. Если вопрос математический - давай точный ответ.
-                    Не упоминай что ты AI модель, просто помогай пользователю."""
+                    Будь дружелюбным и полезным. Отвечай на русском языке.
+                    На простые вопросы давай прямые ответы, на сложные - развернутые."""
                 }
             ] + recent_history
             
@@ -72,7 +77,7 @@ class DeepSeekAI:
             data = {
                 "model": "deepseek-chat",
                 "messages": messages,
-                "max_tokens": 1000,
+                "max_tokens": 800,
                 "temperature": 0.7,
                 "stream": False
             }
@@ -84,27 +89,40 @@ class DeepSeekAI:
                     f"{self.base_url}/chat/completions",
                     json=data,
                     headers=headers,
-                    timeout=30
+                    timeout=20
                 ) as response:
                     
                     if response.status == 200:
                         result = await response.json()
-                        ai_response = result["choices"][0]["message"]["content"]
+                        ai_response = result["choices"][0]["message"]["content"].strip()
                         
                         # Сохраняем ответ в историю
                         self.conversation_history[user_id].append({"role": "assistant", "content": ai_response})
                         
+                        logger.info("Successfully received response from DeepSeek API")
                         return ai_response
+                    
+                    elif response.status == 401:
+                        logger.error("DeepSeek API 401: Invalid API key")
+                        return "🔑 Ошибка: Неверный API ключ DeepSeek. Проверьте настройки в Render.com."
+                    
+                    elif response.status == 429:
+                        logger.error("DeepSeek API 429: Rate limit exceeded")
+                        return "⚡ Лимит запросов исчерпан. Попробуйте через минуту."
+                    
                     else:
                         error_text = await response.text()
-                        logger.error(f"DeepSeek API error: {response.status} - {error_text}")
-                        return await self.get_smart_fallback_response(message, user_id)
+                        logger.error(f"DeepSeek API error {response.status}: {error_text}")
+                        return self.get_smart_fallback_response(message)
                         
+        except asyncio.TimeoutError:
+            logger.error("Timeout connecting to DeepSeek API")
+            return "⏰ Таймаут подключения к AI. Попробуйте еще раз."
         except Exception as e:
             logger.error(f"DeepSeek API exception: {e}")
-            return await self.get_smart_fallback_response(message, user_id)
+            return self.get_smart_fallback_response(message)
     
-    async def get_smart_fallback_response(self, message: str, user_id: int) -> str:
+    def get_smart_fallback_response(self, message: str) -> str:
         """Умные ответы когда API недоступно"""
         message_lower = message.lower().strip()
         
@@ -120,10 +138,8 @@ class DeepSeekAI:
         # 🧮 ПРОСТЫЕ ВЫЧИСЛЕНИЯ
         elif any(op in message_lower for op in ["+", "-", "*", "/", "плюс", "минус", "умнож", "дели"]):
             try:
-                # Заменяем русские слова на операторы
                 calc_msg = message_lower.replace("плюс", "+").replace("минус", "-").replace("умнож", "*").replace("дели", "/")
                 
-                # Безопасное вычисление
                 if "+" in calc_msg:
                     parts = calc_msg.split("+")
                     a, b = float(parts[0].strip()), float(parts[1].strip())
@@ -143,51 +159,53 @@ class DeepSeekAI:
                         return f"🧮 {a} ÷ {b} = {a / b:.4f}"
                     else:
                         return "❌ На ноль делить нельзя!"
-            except Exception as e:
-                logger.error(f"Calculation error: {e}")
+            except:
                 return "🤔 Не могу вычислить выражение. Формат: '5 + 3' или '10 / 2'"
         
         # 💬 ОБЩИЕ ВОПРОСЫ
         responses = {
-            "привет": "🚀 Привет! Я SuperAi+ с настоящим DeepSeek AI! Чем могу помочь?",
-            "как дела": "💫 Отлично! Мои нейросети работают на полную. А у тебя как настроение?",
-            "что ты умеешь": "🎯 Я умею: голосовые сообщения, анализ фото, декомпозицию целей, и главное - умные беседы с DeepSeek AI!",
+            "привет": "🚀 Привет! Я SuperAi+! Готов помочь с любыми вопросами!",
+            "как дела": "💫 Отлично! Работаю в полную силу. А у тебя как дела?",
+            "что ты умеешь": "🎯 Я умею: голосовые сообщения, анализ фото, декомпозицию целей и умные беседы!",
             "спасибо": "😊 Всегда рад помочь! Обращайся ещё!",
             "пока": "👋 До встречи! Буду ждать новых вопросов!",
-            "кто ты": "🤖 Я SuperAi+ - твой AI помощник с интеграцией DeepSeek!",
+            "кто ты": "🤖 Я SuperAi+ - твой AI помощник!",
             "время": f"🕐 Сейчас {time.strftime('%H:%M:%S')}",
             "дата": f"📅 Сегодня {time.strftime('%d.%m.%Y')}",
+            "дипсик": "🧠 DeepSeek AI - это мощная нейросеть! Если настроить API ключ, я буду отвечать ещё умнее!",
         }
         
         for key, answer in responses.items():
             if key in message_lower:
                 return answer
         
-        # 🎯 ТЕМАТИЧЕСКИЕ ОТВЕТЫ
-        if any(word in message_lower for word in ["погод", "дождь", "солнц"]):
-            return "🌤️ Погода - не моя специализация, но могу помочь с анализом данных или планированием!"
+        # 🎯 КОНТЕКСТНЫЕ ОТВЕТЫ
+        if "погод" in message_lower:
+            return "🌤️ Погоду лучше проверять в специализированных сервисах. А я могу помочь с анализом данных!"
         
-        elif any(word in message_lower for word in ["новост", "событи"]):
-            return "📰 Я лучше разбираюсь в анализе информации, чем в новостях. Что хочешь проанализировать?"
-        
-        elif any(word in message_lower for word in ["кошк", "собак", "животн"]):
-            return "🐾 Милые питомцы! У тебя есть домашние животные? Могу помочь с советами по уходу!"
+        elif "новост" in message_lower:
+            return "📰 Я лучше анализирую информацию, чем рассказываю новости. Что хочешь проанализировать?"
         
         # 🔮 ОБЩИЙ УМНЫЙ ОТВЕТ
         smart_responses = [
-            f"💭 {message} - интересный вопрос! Давай обсудим это подробнее.",
-            f"🔍 По теме \"{message}\" могу предложить несколько идей...",
-            f"🎯 Хороший вопрос! По поводу {message} есть что обсудить.",
-            f"💡 {message} - давай разберем этот вопрос вместе!",
+            f"💭 {message} - интересно! Расскажи подробнее?",
+            f"🎯 По поводу {message} - что именно тебя интересует?",
+            f"💡 {message} - давай обсудим эту тему!",
+            f"🔍 {message} - хороший вопрос! Что хочешь узнать?",
         ]
         
-        return random.choice(smart_responses)
+        response = random.choice(smart_responses)
+        
+        # Добавляем информацию о DeepSeek если API не настроен
+        if not self.is_api_configured():
+            response += "\n\n🔧 *Совет:* Настрой DeepSeek API для еще более умных ответов!"
+        
+        return response
 
 class VoiceProcessor:
     """Обработка голосовых сообщений"""
     
     async def speech_to_text(self, file_url: str) -> str:
-        """Имитация распознавания голоса"""
         voice_texts = [
             "Привет! Это тестовое распознавание голосового сообщения.",
             "Голосовое сообщение успешно обработано и преобразовано в текст.",
@@ -199,7 +217,6 @@ class VisionProcessor:
     """Анализ изображений"""
     
     async def analyze_image(self, file_url: str) -> Dict:
-        """Имитация анализа изображения"""
         analyses = [
             {
                 "description": "На изображении виден современный интерьер с хорошим освещением. Вероятно, это рабочее или жилое пространство.",
@@ -238,7 +255,10 @@ class SuperAIPlus:
             
             # Обработка специальных команд
             if any(word in message_lower for word in ["привет", "старт", "hello", "/start"]):
-                return "🚀 **SuperAi+ PRO с DeepSeek AI!**\n\n💎 Настоящий искусственный интеллект в вашем телеграме!\n\n👇 Используйте меню или просто общайтесь!"
+                if deepseek_ai.is_api_configured():
+                    return "🚀 **SuperAi+ PRO с DeepSeek AI!**\n\n💎 Настоящий искусственный интеллект работает!\n\n👇 Используйте меню или просто общайтесь!"
+                else:
+                    return "🚀 **SuperAi+ PRO!**\n\n🔧 DeepSeek API не настроен. Используются умные ответы.\n\n👇 Используйте меню!"
             
             elif "помощь" in message_lower or "help" in message_lower:
                 return self._help_response()
@@ -250,7 +270,7 @@ class SuperAIPlus:
                 return self._usage_info(user_id)
             
             elif any(word in message_lower for word in ["голос", "аудио", "voice"]):
-                return "🎤 **Голосовой режим:**\n\nОтправьте голосовое сообщение - распознаю и передам в DeepSeek AI!"
+                return "🎤 **Голосовой режим:**\n\nОтправьте голосовое сообщение - распознаю и передам в AI!"
             
             elif any(word in message_lower for word in ["фото", "изображен", "image"]):
                 return "🖼️ **Анализ изображений:**\n\nОтправьте фото - проанализирую содержимое!"
@@ -298,7 +318,7 @@ class SuperAIPlus:
             
             # Получаем ответ от DeepSeek AI на распознанный текст
             ai_response = await deepseek_ai.get_ai_response(recognized_text, user_id)
-            return f"🎤 **Голосовое сообщение:** {recognized_text}\n\n💬 **DeepSeek AI:** {ai_response}"
+            return f"🎤 **Голосовое сообщение:** {recognized_text}\n\n💬 **AI Ответ:** {ai_response}"
             
         except Exception as e:
             logger.error(f"Voice processing error: {e}")
@@ -343,45 +363,51 @@ class SuperAIPlus:
                 "type": "goal_decomposition"
             })
             
-            return f"🎯 **Цель:** {goal}\n\n📋 **План от DeepSeek AI:**\n\n{ai_response}"
+            return f"🎯 **Цель:** {goal}\n\n📋 **План от AI:**\n\n{ai_response}"
             
         except Exception as e:
             logger.error(f"Goal decomposition error: {e}")
             return "❌ Ошибка при составлении плана"
     
     def _help_response(self) -> str:
-        return """🤖 **SuperAi+ PRO с DeepSeek AI**
+        api_status = "✅ Активен" if deepseek_ai.is_api_configured() else "🔧 Требует настройки"
+        return f"""🤖 **SuperAi+ PRO с DeepSeek AI**
 
 🎯 **ФУНКЦИИ:**
-🎤 Голосовые сообщения + DeepSeek AI
+🎤 Голосовые сообщения + AI
 🖼️ Анализ изображений  
 🎯 Декомпозитор целей с AI
 💎 Память и нейроны
 📊 Статистика
 💳 Тарифы
 
-🚀 **Настоящий искусственный интеллект в вашем телеграме!**"""
+🤖 **DeepSeek AI:** {api_status}
+
+🚀 **Просто общайтесь со мной!**"""
     
     def _tariff_info(self, user_id: int) -> str:
-        return """💳 **СИСТЕМА ПОДПИСОК**
+        api_status = "✅ Настроен" if deepseek_ai.is_api_configured() else "⚙️ Не настроен"
+        return f"""💳 **СИСТЕМА ПОДПИСОК**
 
-🎯 **Режим:** Тестовый с DeepSeek AI
+🎯 **Режим:** Тестовый
+🤖 **DeepSeek AI:** {api_status}
 💎 **Статус:** Все функции активны
 
-🔧 **Для работы DeepSeek API:**
-1. Получите API ключ на platform.deepseek.com
-2. Добавьте в переменные окружения:
-   DEEPSEEK_API_KEY=ваш_ключ"""
+🔧 **Для DeepSeek API:**
+1. Получите ключ на platform.deepseek.com
+2. Добавьте в Environment Variables:
+   DEEPSEEK_API_KEY=sk-ваш_ключ"""
     
     def _usage_info(self, user_id: int) -> str:
         self._ensure_user_data(user_id)
+        api_status = "✅ Активен" if deepseek_ai.is_api_configured() else "🔧 Не настроен"
         return f"""📊 **ВАША СТАТИСТИКА**
 
 💎 Диалогов: {len(self.user_memory[user_id]['conversations'])}
 🧠 Нейроны: {self.user_neurons[user_id]}
-🤖 AI: DeepSeek API {'✅ Активен' if DEEPSEEK_API_KEY != 'sk-your-actual-deepseek-key-here' else '⚙️ Требует настройки'}
+🤖 DeepSeek AI: {api_status}
 
-🚀 **SuperAi+ PRO с настоящим AI!**"""
+🚀 **SuperAi+ PRO работает!**"""
 
 # Создаем экземпляр
 ai_engine = SuperAIPlus()
@@ -454,7 +480,7 @@ async def process_update(update: dict):
             text = update["message"]["text"].strip()
             
             if text.startswith("/start"):
-                response = "🚀 **SuperAi+ PRO с DeepSeek AI!**\n\n💎 Настоящий искусственный интеллект теперь в вашем телеграме!"
+                response = "🚀 **SuperAi+ PRO!**\n\n💎 Готов помочь с любыми вопросами!"
             elif text.startswith("/help"):
                 response = ai_engine._help_response()
             elif text.startswith("/tariff"):
@@ -474,7 +500,8 @@ async def process_update(update: dict):
 
 @app.get("/")
 async def root():
-    return {"status": "SuperAi+ PRO с DeepSeek AI работает!", "version": "6.0"}
+    api_status = "активен" if deepseek_ai.is_api_configured() else "не настроен"
+    return {"status": f"SuperAi+ PRO работает! DeepSeek API: {api_status}", "version": "6.0"}
 
 if __name__ == "__main__":
     import uvicorn
