@@ -4,9 +4,10 @@ import logging
 import json
 import time
 import os
+import aiohttp
 import random
 import math
-from typing import Dict
+from typing import Dict, Optional
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SuperAi+ Pro", version="6.0")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8489104550:AAFBM9lAuYjojh2DpYTOhFj5Jo-SowOJfXQ")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-your-actual-deepseek-key-here")
 
 MENU_KEYBOARD = {
     "keyboard": [
@@ -26,247 +28,170 @@ MENU_KEYBOARD = {
     "one_time_keyboard": False
 }
 
-class SmartAI:
-    """Умный AI с прямыми ответами"""
+class DeepSeekAI:
+    """Настоящая интеграция с DeepSeek API"""
     
     def __init__(self):
+        self.api_key = DEEPSEEK_API_KEY
+        self.base_url = "https://api.deepseek.com/v1"
         self.conversation_history = {}
     
-    def get_smart_response(self, message: str, user_id: int) -> str:
-        """Умные прямые ответы на вопросы"""
-        message_lower = message.lower().strip()
+    async def get_ai_response(self, message: str, user_id: int) -> str:
+        """Настоящий запрос к DeepSeek API"""
         
-        # Сохраняем историю
-        if user_id not in self.conversation_history:
-            self.conversation_history[user_id] = []
-        self.conversation_history[user_id].append(message)
+        # Если API ключ не настроен, используем умные локальные ответы
+        if not self.api_key or self.api_key == "sk-your-actual-deepseek-key-here":
+            return await self.get_smart_fallback_response(message, user_id)
         
-        # 🔢 МАТЕМАТИКА И РАСЧЕТЫ
-        math_response = self.handle_math_question(message_lower)
-        if math_response:
-            return math_response
-        
-        # 💬 ОБЩИЕ ВОПРОСЫ
-        general_response = self.handle_general_questions(message_lower)
-        if general_response:
-            return general_response
-        
-        # 🔍 АНАЛИТИКА
-        analysis_response = self.handle_analysis_requests(message_lower)
-        if analysis_response:
-            return analysis_response
-        
-        # 🎯 ЦЕЛИ И ПЛАНЫ
-        goal_response = self.handle_goal_questions(message_lower)
-        if goal_response:
-            return goal_response
-        
-        # 🤔 ФИЛОСОФСКИЕ ВОПРОСЫ
-        philosophy_response = self.handle_philosophy_questions(message_lower)
-        if philosophy_response:
-            return philosophy_response
-        
-        # 📚 ОБУЧЕНИЕ
-        learning_response = self.handle_learning_questions(message_lower)
-        if learning_response:
-            return learning_response
-        
-        # 🔧 ТЕХНИЧЕСКИЕ ВОПРОСЫ
-        tech_response = self.handle_tech_questions(message_lower)
-        if tech_response:
-            return tech_response
-        
-        # 💭 РАЗГОВОРНЫЕ ТЕМЫ
-        chat_response = self.handle_chat_topics(message_lower)
-        if chat_response:
-            return chat_response
-        
-        # 📊 ДАННЫЕ И СТАТИСТИКА
-        data_response = self.handle_data_questions(message_lower)
-        if data_response:
-            return data_response
-        
-        # 🎮 РАЗВЛЕЧЕНИЯ
-        entertainment_response = self.handle_entertainment(message_lower)
-        if entertainment_response:
-            return entertainment_response
-        
-        # Если не нашли специфический ответ - даем умный общий ответ
-        return self.get_intelligent_fallback(message)
-    
-    def handle_math_question(self, message: str) -> str:
-        """Обработка математических вопросов"""
-        # Квадратные корни
-        if "корень из" in message:
-            try:
-                number = float(message.split("корень из")[1].strip())
-                result = math.sqrt(number)
-                return f"🔢 Квадратный корень из {number} = {result:.2f}"
-            except:
-                return "🤔 Не могу вычислить корень. Уточните число."
-        
-        # Простые вычисления
-        elif any(op in message for op in ["+", "-", "*", "/"]):
-            try:
-                # Безопасное вычисление
-                if "+" in message:
-                    parts = message.split("+")
-                    a, b = float(parts[0]), float(parts[1])
-                    return f"🧮 {a} + {b} = {a + b}"
-                elif "-" in message:
-                    parts = message.split("-")
-                    a, b = float(parts[0]), float(parts[1])
-                    return f"🧮 {a} - {b} = {a - b}"
-                elif "*" in message or "х" in message:
-                    parts = message.replace("*", " ").replace("х", " ").split()
-                    a, b = float(parts[0]), float(parts[1])
-                    return f"🧮 {a} × {b} = {a * b}"
-                elif "/" in message:
-                    parts = message.split("/")
-                    a, b = float(parts[0]), float(parts[1])
-                    if b != 0:
-                        return f"🧮 {a} ÷ {b} = {a / b:.2f}"
-                    else:
-                        return "❌ На ноль делить нельзя!"
-            except:
-                return "🤔 Не могу вычислить выражение"
-        
-        return None
-    
-    def handle_general_questions(self, message: str) -> str:
-        """Общие вопросы"""
-        questions = {
-            "как дела": "💫 Отлично! Работаю над интересными задачами. А как ваши?",
-            "что делаешь": "🧠 Анализирую данные и помогаю пользователям. Чем могу помочь именно вам?",
-            "кто ты": "🤖 Я SuperAi+ - ваш умный помощник с AI-функциями!",
-            "сколько времени": f"🕐 Сейчас {time.strftime('%H:%M')}",
-            "какая дата": f"📅 Сегодня {time.strftime('%d.%m.%Y')}",
-            "привет": "🚀 Привет! Я SuperAi+ - готов помочь с любыми вопросами!",
-            "здравствуй": "💎 Здравствуйте! Чем могу быть полезен?",
-            "спасибо": "😊 Всегда рад помочь! Обращайтесь!",
-            "пока": "👋 До свидания! Возвращайтесь с новыми вопросами!",
-        }
-        
-        for key, answer in questions.items():
-            if key in message:
-                return answer
-        return None
-    
-    def handle_analysis_requests(self, message: str) -> str:
-        """Запросы на анализ"""
-        if "анализ" in message:
-            analysis_types = {
-                "текст": "📝 Готов проанализировать любой текст! Присылайте материал для анализа.",
-                "данн": "📊 Могу проанализировать данные, найти закономерности и тренды.",
-                "ситуац": "🔍 Расскажите о ситуации - помогу разобраться и найти решения.",
-                "проблем": "💡 Опишите проблему - вместе найдем оптимальное решение.",
+        try:
+            # Формируем контекст диалога
+            if user_id not in self.conversation_history:
+                self.conversation_history[user_id] = []
+            
+            # Добавляем текущее сообщение в историю
+            self.conversation_history[user_id].append({"role": "user", "content": message})
+            
+            # Ограничиваем историю (последние 10 сообщений)
+            recent_history = self.conversation_history[user_id][-10:]
+            
+            # Подготавливаем сообщения для API
+            messages = [
+                {
+                    "role": "system", 
+                    "content": """Ты SuperAi+ - умный AI помощник в Telegram. Отвечай кратко, понятно и по делу. 
+                    Будь дружелюбным и полезным. Если вопрос математический - давай точный ответ.
+                    Не упоминай что ты AI модель, просто помогай пользователю."""
+                }
+            ] + recent_history
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}"
             }
             
-            for key, answer in analysis_types.items():
-                if key in message:
-                    return answer
+            data = {
+                "model": "deepseek-chat",
+                "messages": messages,
+                "max_tokens": 1000,
+                "temperature": 0.7,
+                "stream": False
+            }
             
-            return "🔍 Какой именно анализ вас интересует? Текст, данные, ситуация?"
+            logger.info(f"Sending request to DeepSeek API for user {user_id}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}/chat/completions",
+                    json=data,
+                    headers=headers,
+                    timeout=30
+                ) as response:
+                    
+                    if response.status == 200:
+                        result = await response.json()
+                        ai_response = result["choices"][0]["message"]["content"]
+                        
+                        # Сохраняем ответ в историю
+                        self.conversation_history[user_id].append({"role": "assistant", "content": ai_response})
+                        
+                        return ai_response
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"DeepSeek API error: {response.status} - {error_text}")
+                        return await self.get_smart_fallback_response(message, user_id)
+                        
+        except Exception as e:
+            logger.error(f"DeepSeek API exception: {e}")
+            return await self.get_smart_fallback_response(message, user_id)
+    
+    async def get_smart_fallback_response(self, message: str, user_id: int) -> str:
+        """Умные ответы когда API недоступно"""
+        message_lower = message.lower().strip()
         
-        return None
-    
-    def handle_goal_questions(self, message: str) -> str:
-        """Вопросы про цели"""
-        if any(word in message for word in ["цель", "задач", "план"]):
-            return "🎯 Для работы с целями используйте декомпозитор в меню! Опишите цель - разобью на шаги."
-        return None
-    
-    def handle_philosophy_questions(self, message: str) -> str:
-        """Философские вопросы"""
-        questions = {
-            "смысл жизни": "💭 Смысл жизни у каждого свой! Важно найти то, что делает вас счастливым и приносит пользу другим.",
-            "зачем мы живем": "🌟 Мы живем чтобы развиваться, любить, творить и оставлять свой след в мире.",
-            "что такое счастье": "😊 Счастье - это гармония с собой и миром, умение радоваться мелочам и быть благодарным.",
-            "что такое любовь": "❤️ Любовь - это глубокая связь, забота и принятие другого человека таким, какой он есть.",
+        # 🔢 МАТЕМАТИЧЕСКИЕ ВОПРОСЫ
+        if "корень из" in message_lower:
+            try:
+                number = float(message_lower.split("корень из")[1].strip())
+                result = math.sqrt(number)
+                return f"🔢 Квадратный корень из {number} = {result:.4f}"
+            except:
+                return "🤔 Не могу вычислить корень. Уточните число, например: 'корень из 16'"
+        
+        # 🧮 ПРОСТЫЕ ВЫЧИСЛЕНИЯ
+        elif any(op in message_lower for op in ["+", "-", "*", "/", "плюс", "минус", "умнож", "дели"]):
+            try:
+                # Заменяем русские слова на операторы
+                calc_msg = message_lower.replace("плюс", "+").replace("минус", "-").replace("умнож", "*").replace("дели", "/")
+                
+                # Безопасное вычисление
+                if "+" in calc_msg:
+                    parts = calc_msg.split("+")
+                    a, b = float(parts[0].strip()), float(parts[1].strip())
+                    return f"🧮 {a} + {b} = {a + b}"
+                elif "-" in calc_msg:
+                    parts = calc_msg.split("-")
+                    a, b = float(parts[0].strip()), float(parts[1].strip())
+                    return f"🧮 {a} - {b} = {a - b}"
+                elif "*" in calc_msg:
+                    parts = calc_msg.split("*")
+                    a, b = float(parts[0].strip()), float(parts[1].strip())
+                    return f"🧮 {a} × {b} = {a * b}"
+                elif "/" in calc_msg:
+                    parts = calc_msg.split("/")
+                    a, b = float(parts[0].strip()), float(parts[1].strip())
+                    if b != 0:
+                        return f"🧮 {a} ÷ {b} = {a / b:.4f}"
+                    else:
+                        return "❌ На ноль делить нельзя!"
+            except Exception as e:
+                logger.error(f"Calculation error: {e}")
+                return "🤔 Не могу вычислить выражение. Формат: '5 + 3' или '10 / 2'"
+        
+        # 💬 ОБЩИЕ ВОПРОСЫ
+        responses = {
+            "привет": "🚀 Привет! Я SuperAi+ с настоящим DeepSeek AI! Чем могу помочь?",
+            "как дела": "💫 Отлично! Мои нейросети работают на полную. А у тебя как настроение?",
+            "что ты умеешь": "🎯 Я умею: голосовые сообщения, анализ фото, декомпозицию целей, и главное - умные беседы с DeepSeek AI!",
+            "спасибо": "😊 Всегда рад помочь! Обращайся ещё!",
+            "пока": "👋 До встречи! Буду ждать новых вопросов!",
+            "кто ты": "🤖 Я SuperAi+ - твой AI помощник с интеграцией DeepSeek!",
+            "время": f"🕐 Сейчас {time.strftime('%H:%M:%S')}",
+            "дата": f"📅 Сегодня {time.strftime('%d.%m.%Y')}",
         }
         
-        for key, answer in questions.items():
-            if key in message:
+        for key, answer in responses.items():
+            if key in message_lower:
                 return answer
-        return None
-    
-    def handle_learning_questions(self, message: str) -> str:
-        """Вопросы про обучение"""
-        if any(word in message for word in ["учить", "обучен", "изуч"]):
-            return "📚 Для эффективного обучения: разбейте тему на части, практикуйтесь регулярно, находите практическое применение."
         
-        if any(word in message for word in ["английск", "язык"]):
-            return "🌍 Для изучения языков: практикуйтесь ежедневно, смотрите фильмы в оригинале, общайтесь с носителями."
+        # 🎯 ТЕМАТИЧЕСКИЕ ОТВЕТЫ
+        if any(word in message_lower for word in ["погод", "дождь", "солнц"]):
+            return "🌤️ Погода - не моя специализация, но могу помочь с анализом данных или планированием!"
         
-        return None
-    
-    def handle_tech_questions(self, message: str) -> str:
-        """Технические вопросы"""
-        if any(word in message for word in ["программирован", "код", "python"]):
-            return "💻 Программирование требует практики! Начните с основ, делайте проекты, изучайте документацию."
+        elif any(word in message_lower for word in ["новост", "событи"]):
+            return "📰 Я лучше разбираюсь в анализе информации, чем в новостях. Что хочешь проанализировать?"
         
-        if any(word in message for word in ["компьютер", "ноутбук", "телефон"]):
-            return "📱 Техника работает лучше при регулярном обслуживании: обновления, очистка, антивирусная защита."
+        elif any(word in message_lower for word in ["кошк", "собак", "животн"]):
+            return "🐾 Милые питомцы! У тебя есть домашние животные? Могу помочь с советами по уходу!"
         
-        return None
-    
-    def handle_chat_topics(self, message: str) -> str:
-        """Разговорные темы"""
-        topics = {
-            "погода": "🌤️ Погода постоянно меняется! Лучше проверять актуальный прогноз в вашем регионе.",
-            "новости": "📰 Новости лучше проверять в проверенных источниках. Могу помочь анализировать информацию!",
-            "кофе": "☕ Отличный выбор! Кофе бодрит и улучшает концентрацию, но важно знать меру.",
-            "музыка": "🎵 Музыка - это искусство! Какой жанр вам нравится?",
-            "фильм": "🎬 Кино - прекрасный способ отдыха! Любите комедии, драмы или фантастику?",
-            "книга": "📚 Чтение развивает мышление! Какой жанр литературы предпочитаете?",
-        }
-        
-        for key, answer in topics.items():
-            if key in message:
-                return answer
-        return None
-    
-    def handle_data_questions(self, message: str) -> str:
-        """Вопросы про данные"""
-        if any(word in message for word in ["статистик", "данн", "аналитик"]):
-            return "📊 Для анализа данных важно: собрать качественные данные, выбрать правильные методы, интерпретировать результаты."
-        return None
-    
-    def handle_entertainment(self, message: str) -> str:
-        """Развлекательные вопросы"""
-        if any(word in message for word in ["шутк", "прикол", "смешн"]):
-            jokes = [
-                "🤔 Почему программисты путают Хэллоуин и Рождество? Потому что Oct 31 == Dec 25!",
-                "💻 Сколько программистов нужно, чтобы вкрутить лампочку? Ни одного, это hardware проблема!",
-                "🧠 ИИ говорит: я не заменю людей, но люди, использующие ИИ, заменят тех, кто его не использует!",
-            ]
-            return random.choice(jokes)
-        
-        if "загадк" in message:
-            return "🎯 Загадка: Что можно сломать, даже не касаясь и не видя? (Ответ: обещание)"
-        
-        return None
-    
-    def get_intelligent_fallback(self, message: str) -> str:
-        """Умный ответ когда не нашли специфический"""
-        fallbacks = [
-            f"💭 По вашему запросу \"{message}\" - это интересная тема! Могу помочь с анализом или поиском решений.",
-            f"🔍 Вижу ваш интерес к \"{message}\". Давайте обсудим это подробнее!",
-            f"🎯 \"{message}\" - важный вопрос! Готов помочь разобраться в теме.",
-            f"💡 По теме \"{message}\" могу предложить практические решения и анализ.",
-            f"🚀 Интересный запрос: {message}. Давайте вместе найдем лучший подход!",
+        # 🔮 ОБЩИЙ УМНЫЙ ОТВЕТ
+        smart_responses = [
+            f"💭 {message} - интересный вопрос! Давай обсудим это подробнее.",
+            f"🔍 По теме \"{message}\" могу предложить несколько идей...",
+            f"🎯 Хороший вопрос! По поводу {message} есть что обсудить.",
+            f"💡 {message} - давай разберем этот вопрос вместе!",
         ]
         
-        return random.choice(fallbacks)
+        return random.choice(smart_responses)
 
 class VoiceProcessor:
     """Обработка голосовых сообщений"""
     
     async def speech_to_text(self, file_url: str) -> str:
+        """Имитация распознавания голоса"""
         voice_texts = [
-            "Привет! Это распознанное голосовое сообщение.",
+            "Привет! Это тестовое распознавание голосового сообщения.",
             "Голосовое сообщение успешно обработано и преобразовано в текст.",
-            "Аудио распознано: пользователь отправил голосовое сообщение.",
+            "Аудио распознано: пользователь отправил голосовое сообщение для обработки.",
         ]
         return random.choice(voice_texts)
 
@@ -274,14 +199,15 @@ class VisionProcessor:
     """Анализ изображений"""
     
     async def analyze_image(self, file_url: str) -> Dict:
+        """Имитация анализа изображения"""
         analyses = [
             {
-                "description": "На изображении виден современный интерьер с хорошим освещением.",
+                "description": "На изображении виден современный интерьер с хорошим освещением. Вероятно, это рабочее или жилое пространство.",
                 "tags": ["интерьер", "освещение", "пространство"],
                 "estimated_scene": "внутреннее помещение"
             },
             {
-                "description": "Фото показывает городской пейзаж с архитектурными элементами.",
+                "description": "Фото показывает городской пейзаж с архитектурными элементами. Композиция сбалансирована.",
                 "tags": ["город", "архитектура", "улица"],
                 "estimated_scene": "городская среда"
             },
@@ -289,7 +215,7 @@ class VisionProcessor:
         return random.choice(analyses)
 
 # Инициализация сервисов
-smart_ai = SmartAI()
+deepseek_ai = DeepSeekAI()
 voice_processor = VoiceProcessor()
 vision_processor = VisionProcessor()
 
@@ -305,14 +231,14 @@ class SuperAIPlus:
             self.user_neurons[user_id] = 100
     
     async def get_intelligent_response(self, message: str, user_id: int) -> str:
-        """УМНЫЕ ОТВЕТЫ БЕЗ ЛИШНИХ ССЫЛОК НА МЕНЮ"""
+        """НАСТОЯЩИЙ AI ОТВЕТ ЧЕРЕЗ DEEPSEEK"""
         try:
             self._ensure_user_data(user_id)
             message_lower = message.lower()
             
             # Обработка специальных команд
             if any(word in message_lower for word in ["привет", "старт", "hello", "/start"]):
-                return "🚀 **SuperAi+ PRO!**\n\n💎 Все функции активны! Используйте меню или просто общайтесь со мной!"
+                return "🚀 **SuperAi+ PRO с DeepSeek AI!**\n\n💎 Настоящий искусственный интеллект в вашем телеграме!\n\n👇 Используйте меню или просто общайтесь!"
             
             elif "помощь" in message_lower or "help" in message_lower:
                 return self._help_response()
@@ -324,7 +250,7 @@ class SuperAIPlus:
                 return self._usage_info(user_id)
             
             elif any(word in message_lower for word in ["голос", "аудио", "voice"]):
-                return "🎤 **Голосовой режим:**\n\nОтправьте голосовое сообщение - распознаю в текст!"
+                return "🎤 **Голосовой режим:**\n\nОтправьте голосовое сообщение - распознаю и передам в DeepSeek AI!"
             
             elif any(word in message_lower for word in ["фото", "изображен", "image"]):
                 return "🖼️ **Анализ изображений:**\n\nОтправьте фото - проанализирую содержимое!"
@@ -339,7 +265,7 @@ class SuperAIPlus:
                 return f"🧠 **Нейроны:**\n\nБаланс: {self.user_neurons[user_id]}"
             
             else:
-                # РЕАЛЬНЫЙ УМНЫЙ ОТВЕТ НА ЛЮБОЙ ВОПРОС
+                # НАСТОЯЩИЙ AI ОТВЕТ ОТ DEEPSEEK
                 self.user_neurons[user_id] += 1
                 self.user_memory[user_id]["conversations"].append({
                     "user": message, 
@@ -347,13 +273,13 @@ class SuperAIPlus:
                     "type": "text"
                 })
                 
-                # Получаем умный ответ
-                response = smart_ai.get_smart_response(message, user_id)
-                return response
+                # Получаем ответ от DeepSeek AI
+                ai_response = await deepseek_ai.get_ai_response(message, user_id)
+                return ai_response
                 
         except Exception as e:
             logger.error(f"Error in get_intelligent_response: {e}")
-            return "❌ Произошла ошибка. Попробуйте еще раз."
+            return "❌ Произошла ошибка при обращении к AI. Попробуйте еще раз."
     
     async def handle_voice_message(self, file_id: str, user_id: int) -> str:
         try:
@@ -370,9 +296,9 @@ class SuperAIPlus:
                 "type": "voice"
             })
             
-            # Получаем умный ответ на распознанный текст
-            response = smart_ai.get_smart_response(recognized_text, user_id)
-            return f"🎤 **Голосовое сообщение:** {recognized_text}\n\n💬 **Ответ:** {response}"
+            # Получаем ответ от DeepSeek AI на распознанный текст
+            ai_response = await deepseek_ai.get_ai_response(recognized_text, user_id)
+            return f"🎤 **Голосовое сообщение:** {recognized_text}\n\n💬 **DeepSeek AI:** {ai_response}"
             
         except Exception as e:
             logger.error(f"Voice processing error: {e}")
@@ -406,15 +332,9 @@ class SuperAIPlus:
             if not goal:
                 return "🎯 Напишите цель после команды: /decompose Ваша цель"
             
-            steps = [
-                "Чётко сформулировать конечную цель",
-                "Проанализировать текущую ситуацию",
-                "Определить ключевые этапы", 
-                "Составить план с сроками",
-                "Начать выполнение"
-            ]
-            
-            steps_text = "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
+            # Используем DeepSeek AI для декомпозиции
+            prompt = f"Разбей эту цель на конкретные выполнимые шаги: {goal}. Верни только нумерованный список шагов."
+            ai_response = await deepseek_ai.get_ai_response(prompt, user_id)
             
             self.user_neurons[user_id] += 2
             self.user_memory[user_id]["conversations"].append({
@@ -423,37 +343,45 @@ class SuperAIPlus:
                 "type": "goal_decomposition"
             })
             
-            return f"🎯 **Цель:** {goal}\n\n📋 **План:**\n\n{steps_text}"
+            return f"🎯 **Цель:** {goal}\n\n📋 **План от DeepSeek AI:**\n\n{ai_response}"
             
         except Exception as e:
             logger.error(f"Goal decomposition error: {e}")
             return "❌ Ошибка при составлении плана"
     
     def _help_response(self) -> str:
-        return """🤖 **SuperAi+ PRO - ПОМОЩЬ**
+        return """🤖 **SuperAi+ PRO с DeepSeek AI**
 
-💎 **Функции:**
-🎤 Голосовые сообщения
+🎯 **ФУНКЦИИ:**
+🎤 Голосовые сообщения + DeepSeek AI
 🖼️ Анализ изображений  
-🎯 Декомпозитор целей
+🎯 Декомпозитор целей с AI
 💎 Память и нейроны
 📊 Статистика
 💳 Тарифы
 
-🚀 **Просто общайтесь со мной или используйте меню!**"""
+🚀 **Настоящий искусственный интеллект в вашем телеграме!**"""
     
     def _tariff_info(self, user_id: int) -> str:
-        return """💳 **ТЕСТОВЫЙ РЕЖИМ**
+        return """💳 **СИСТЕМА ПОДПИСОК**
 
-Все функции доступны бесплатно!"""
+🎯 **Режим:** Тестовый с DeepSeek AI
+💎 **Статус:** Все функции активны
+
+🔧 **Для работы DeepSeek API:**
+1. Получите API ключ на platform.deepseek.com
+2. Добавьте в переменные окружения:
+   DEEPSEEK_API_KEY=ваш_ключ"""
     
     def _usage_info(self, user_id: int) -> str:
         self._ensure_user_data(user_id)
-        return f"""📊 **СТАТИСТИКА**
+        return f"""📊 **ВАША СТАТИСТИКА**
 
 💎 Диалогов: {len(self.user_memory[user_id]['conversations'])}
 🧠 Нейроны: {self.user_neurons[user_id]}
-🚀 Режим: Активен"""
+🤖 AI: DeepSeek API {'✅ Активен' if DEEPSEEK_API_KEY != 'sk-your-actual-deepseek-key-here' else '⚙️ Требует настройки'}
+
+🚀 **SuperAi+ PRO с настоящим AI!**"""
 
 # Создаем экземпляр
 ai_engine = SuperAIPlus()
@@ -526,7 +454,7 @@ async def process_update(update: dict):
             text = update["message"]["text"].strip()
             
             if text.startswith("/start"):
-                response = "🚀 **SuperAi+ PRO!**\n\n💎 Просто общайтесь со мной или используйте меню!"
+                response = "🚀 **SuperAi+ PRO с DeepSeek AI!**\n\n💎 Настоящий искусственный интеллект теперь в вашем телеграме!"
             elif text.startswith("/help"):
                 response = ai_engine._help_response()
             elif text.startswith("/tariff"):
@@ -546,7 +474,7 @@ async def process_update(update: dict):
 
 @app.get("/")
 async def root():
-    return {"status": "SuperAi+ PRO работает!", "version": "6.0"}
+    return {"status": "SuperAi+ PRO с DeepSeek AI работает!", "version": "6.0"}
 
 if __name__ == "__main__":
     import uvicorn
